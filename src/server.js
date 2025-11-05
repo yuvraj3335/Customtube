@@ -32,7 +32,8 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SITE_NAME = 'Custom Tube';
-const MAX_PROFILE_IDS = 200;
+const MAX_PROFILE_IDS = 200; // seen, docs lookups
+const MAX_VOTE_IDS = 500; // likes and dislikes: the client keeps up to 500 of each
 const MAX_QUERY = 200;
 const STATIC_TYPES = {
   '.js': 'application/javascript; charset=utf-8',
@@ -221,7 +222,8 @@ export function feedParamsFromJson(body) {
         if (['like', 'dislike', 'seen'].includes(key)) continue;
         throw badRequest(`"${key}" is empty`);
       }
-      if (value.length > 200) throw badRequest(`"${key}" accepts at most 200 values`);
+      // Exact limits per list are checked when the values are parsed.
+      if (value.length > MAX_VOTE_IDS) throw badRequest(`"${key}" accepts at most ${MAX_VOTE_IDS} values`);
       params.set(key, (key === 'mute_channels' ? value.map(encodeURIComponent) : value).join(','));
     } else if (key === 'mix') {
       if (typeof value !== 'object' || Array.isArray(value)) throw badRequest('"mix" must be an object of weights');
@@ -455,8 +457,8 @@ export function createApp({
       assertNonEmpty(params, ['formats', 'types', 'mute_topics', 'follow_topics', 'mute_channels', 'mix', 'news', 'cited']);
       const curation = parseCuration(params, ds);
       const profile = {
-        likes: parseVidList(params.get('like'), 'like', MAX_PROFILE_IDS),
-        dislikes: parseVidList(params.get('dislike'), 'dislike', MAX_PROFILE_IDS),
+        likes: parseVidList(params.get('like'), 'like', MAX_VOTE_IDS),
+        dislikes: parseVidList(params.get('dislike'), 'dislike', MAX_VOTE_IDS),
         seen: parseVidList(params.get('seen'), 'seen', MAX_PROFILE_IDS),
         seed: parseSeed(params.get('seed')),
       };

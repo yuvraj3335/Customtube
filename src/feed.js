@@ -20,7 +20,8 @@ import { allowedByCuration, defaultCuration, mixPattern } from './curation.js';
 import { dotRows } from './vec.js';
 
 export const FEED_LENGTH = 720;
-const PROFILE_CAP = 30; // most recent likes/dislikes used for similarity
+const PROFILE_CAP = 30; // most recent likes/dislikes used for "similar", "corec" and the soft dislike push-down
+const DROP_CAP = 100; // most recent dislikes whose near-copies are dropped outright
 const RECENT_MONTHS = 18;
 const DISLIKE_DROP = 0.88;
 
@@ -65,16 +66,22 @@ export function prepareFeed(ds, { likes = [], dislikes = [], seen = [] } = {}, c
   );
 
   // Dislike penalty: 0 drops a video, 1 leaves it alone.
-  const recentDislikes = disliked.slice(-PROFILE_CAP).filter((d) => d.hasEmbedding);
+  const dropDislikes = disliked.slice(-DROP_CAP).filter((d) => d.hasEmbedding);
+  const recentDislikes = new Set(disliked.slice(-PROFILE_CAP));
   const dislikedChannels = new Set(disliked.map((d) => d.channel));
   const penalty = new Float32Array(ds.videos.length).fill(1);
   for (const v of pool) {
     let p = dislikedChannels.has(v.channel) ? 0.5 : 1;
-    if (recentDislikes.length && v.hasEmbedding) {
-      let max = -1;
-      for (const d of recentDislikes) max = Math.max(max, dotRows(emb, dim, v.i, d.i));
+    if (dropDislikes.length && v.hasEmbedding) {
+      let max = -1; // closest of the last 100 dislikes: a near-copy is dropped
+      let maxRecent = -1; // closest of the last 30: pushes similar videos down
+      for (const d of dropDislikes) {
+        const sim = dotRows(emb, dim, v.i, d.i);
+        if (sim > max) max = sim;
+        if (sim > maxRecent && recentDislikes.has(d)) maxRecent = sim;
+      }
       if (max >= DISLIKE_DROP) p = 0;
-      else if (max > 0.6) p *= 1 - (0.85 * (max - 0.6)) / (DISLIKE_DROP - 0.6);
+      else if (maxRecent > 0.6) p *= 1 - (0.85 * (maxRecent - 0.6)) / (DISLIKE_DROP - 0.6);
     }
     penalty[v.i] = p;
   }
@@ -175,7 +182,8 @@ export function buildFeed(ds, profile = {}, curation = defaultCuration(), prepar
     const byCat = new Map();
     for (const v of pool) {
       const c = v.categories[0];
-      if (!c || touched.has(c.id)) continue;
+      // A video is only "new" if none of its topics is one you've touched or follow.
+      if (!c || v.categories.some((x) => touched.has(x.id))) continue;
       if (!byCat.has(c.id)) byCat.set(c.id, []);
       byCat.get(c.id).push(v);
     }
@@ -211,10 +219,10 @@ export function buildFeed(ds, profile = {}, curation = defaultCuration(), prepar
       (x) => Math.exp((x.sim - 0.55) * 14) * (1 + 0.15 * Math.log1p(x.v.score)) * pen(x.v),
       rngFor(seed, 'similar'),
     );
-    add('similar', similar.map((x) => ({ v: x.v, reason: `Similar to ${quote(x.from.title)}, which you liked` })));
+    add('similar', similar.map((x) => ({ v: x.v, reason: `Similar to ${quote(x.from.title)}, one of your recent likes` })));
 
     const co = weightedOrder(corec, (x) => x.w * (1 + 0.2 * Math.log1p(x.v.score)) * pen(x.v), rngFor(seed, 'corec'));
-    add('corec', co.map((x) => ({ v: x.v, reason: `HN people who recommended ${quote(x.from.title)} also recommend this` })));
+    add('corec', co.map((x) => ({ v: x.v, reason: `HN people who recommended ${quote(x.from.title)} (a recent like) also recommend this` })));
   }
 
   const weights = Object.fromEntries(Object.keys(sources).map((name) => [name, curation.mix[name] ?? 0]));

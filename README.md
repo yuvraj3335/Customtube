@@ -90,8 +90,13 @@ The same inputs always give the same feed, so scrolling never repeats or skips a
   classics weighted by score², similar videos by embedding similarity to your likes. The sources then
   take turns in proportion to their mix weights (smooth weighted round-robin), skipping videos already
   used and avoiding three in a row from one channel.
-- **Dislikes** drop videos almost identical to a disliked one (cosine ≥ 0.88), push similar ones down,
-  and halve the chance of that channel.
+- **Likes.** Up to 500 are kept and all of them are left out of the feed. "Similar" and "same
+  recommenders" are computed from your 30 most recent likes.
+- **Dislikes** (up to 500, all left out): videos almost identical to one of your last 100 dislikes
+  (cosine ≥ 0.88) are dropped, videos similar to your last 30 are pushed down, and a disliked video's
+  channel shows up half as often.
+- **Explore** only offers topics none of your likes, dislikes, history or followed topics touch, on
+  any of a video's topics.
 - **Left out by default:** news-only videos, videos HN only cited, duplicate uploads of the same talk,
   videos YouTube won't play in an embed (when metadata says so), and anything you've opened, liked or
   disliked.
@@ -105,7 +110,7 @@ All endpoints answer `GET` with JSON and reject unknown, invalid or empty parame
 
 | Endpoint | Parameters |
 |---|---|
-| `/api/feed` | `like`, `dislike`, `seen` (ids, ≤200 each), `seed`, `offset`, `n` (≤60); curation: `formats`, `types`, `follow_topics`, `mute_topics`, `mute_channels`, `mix`, `news`, `cited`. Also takes `POST` with a JSON body (what the client uses, since a big profile doesn't fit in a URL), e.g. `{"like": ["…"], "types": ["talk"], "mix": {"explore": 0}, "mute_channels": ["Some Channel"], "news": true}`. In the `GET` form lists are comma-separated, `mute_channels` names are URI-encoded first, and `mix` is `classics:3,explore:0`. Rate limited per client |
+| `/api/feed` | `like`, `dislike` (ids, ≤500 each), `seen` (≤200), `seed`, `offset`, `n` (≤60); curation: `formats`, `types`, `follow_topics`, `mute_topics`, `mute_channels`, `mix`, `news`, `cited`. Also takes `POST` with a JSON body (what the client uses, since a big profile doesn't fit in a URL), e.g. `{"like": ["…"], "types": ["talk"], "mix": {"explore": 0}, "mute_channels": ["Some Channel"], "news": true}`. In the `GET` form lists are comma-separated, `mute_channels` names are URI-encoded first, and `mix` is `classics:3,explore:0`. Rate limited per client |
 | `/api/list` | `cat` or `area`, `offset`, `n`, and filters: `type`, `level`, `evergreen`, `sort`; with metadata also `dur`, `date`, `gems` |
 | `/api/search` | `q` (≤200 chars) and the same filters; `sort` defaults to `relevance`. Rate limited per client |
 | `/api/video` | `vid`: the card, HN stats and comments |

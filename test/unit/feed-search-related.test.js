@@ -57,6 +57,28 @@ test('feed leaves out what you liked, disliked and opened', (t) => {
   for (const vid of [...likes, ...dislikes, ...seen]) assert.ok(!feed.some((x) => x.vid === vid), vid);
 });
 
+test('explore never offers a topic you touched, even as a video\'s second topic', (t) => {
+  const ds = withData(t);
+  // c3v0 is physics first, functional-programming second
+  for (const seed of ['a', 'b', 'c', 'd']) {
+    const liked = buildFeed(ds, { likes: [vidOf(0, 1)], seed });
+    const followed = buildFeed(ds, { seed }, parseCuration(P('follow_topics=functional-programming'), ds));
+    for (const feed of [liked, followed]) {
+      const explore = feed.filter((x) => x.source === 'explore');
+      assert.ok(explore.length > 0);
+      for (const x of explore) assert.ok(!ds.byVid.get(x.vid).categories.some((c) => c.id === 'functional-programming'), `${x.vid} in explore`);
+    }
+  }
+});
+
+test('near-copies of older dislikes (beyond the last 30) are still dropped', (t) => {
+  const ds = withData(t);
+  const old = vidOf(4, 0);
+  const filler = ds.videos.filter((v) => v.visible && !v.categories.some((c) => c.id === 'biology')).slice(0, 35).map((v) => v.vid);
+  const feed = buildFeed(ds, { dislikes: [old, ...filler], seed: 's' });
+  for (const x of feed) assert.ok(dotRows(ds.emb, ds.dim, ds.byVid.get(x.vid).i, ds.byVid.get(old).i) < 0.88, x.vid);
+});
+
 test('likes pull the top of the feed toward the liked topic', (t) => {
   const ds = withData(t);
   const cold = buildFeed(ds, { seed: 's' }).slice(0, 12);

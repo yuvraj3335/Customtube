@@ -41,7 +41,8 @@ function readJsonl(file) {
 export function normalizeTitle(title) {
   return String(title)
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .normalize('NFC') // compose, but keep accents: "й" and "и" are different letters
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim();
 }
 

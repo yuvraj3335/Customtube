@@ -118,6 +118,21 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.waitForSelector('text=Your feed');
   });
 
+  test('hundreds of likes: none of them comes back in the feed', async () => {
+    const list = await (await fetch(`${base}/api/list?n=60`)).json();
+    const more = await (await fetch(`${base}/api/list?n=60&offset=60`)).json();
+    const many = [...list.items, ...more.items].map((x) => x.vid);
+    const saved = await page.evaluate(() => localStorage.getItem('customtube:likes'));
+    await page.evaluate((ids) => localStorage.setItem('customtube:likes', JSON.stringify(ids)), many);
+    const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
+    await page.goto(base + '/');
+    const res = await feed;
+    assert.equal(res.request().postDataJSON().like.length, many.length);
+    const body = await res.json();
+    assert.ok(!body.items.some((x) => many.includes(x.vid)));
+    await page.evaluate((s) => localStorage.setItem('customtube:likes', s), saved);
+  });
+
   test('semantic search finds a topic and filters apply', async () => {
     const q = REAL ? 'distributed systems' : 'physics';
     await page.fill('#q', q);

@@ -107,8 +107,10 @@ describe('API without YouTube metadata', () => {
       assert.equal(r.status, 400, q);
       assert.ok(r.body.error, q);
     }
-    const many = Array.from({ length: 201 }, (_, i) => `v${String(i).padStart(10, '0')}`).join(',');
-    assert.equal((await app.get(`/api/feed?seen=${many}`)).status, 400);
+    const ids = (k) => Array.from({ length: k }, (_, i) => `v${String(i).padStart(10, '0')}`).join(',');
+    assert.equal((await app.get(`/api/feed?seen=${ids(201)}`)).status, 400);
+    assert.equal((await app.get(`/api/feed?like=${ids(500)}&n=1`)).status, 200, 'up to 500 likes');
+    assert.equal((await app.get(`/api/feed?like=${ids(501)}`)).status, 400);
   });
 
   test('list filters, sorts and pages', async () => {

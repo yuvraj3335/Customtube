@@ -96,6 +96,9 @@ test('fails clearly when the export is missing or malformed', (t) => {
 
 test('text helpers', () => {
   assert.equal(normalizeTitle('"Simple Made Easy" - Rich Hickey (2011)'), 'simple made easy rich hickey 2011');
+  // non-Latin titles keep their letters, so their duplicates can be found too
+  assert.equal(normalizeTitle('Я позвонил своему убийце!'), 'я позвонил своему убийце');
+  assert.equal(normalizeTitle('Cafe\u0301 Talk'), 'café talk');
   assert.equal(searchable('Café, Ünïcode & C++'), ' cafe unicode c ');
   assert.equal(parseIsoDuration('PT1H2M3S'), 3723);
   assert.equal(parseIsoDuration('P1DT1S'), 86401);

@@ -5,7 +5,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const VID_RE = /^[A-Za-z0-9_-]{11}$/;
 const SITE = 'Custom Tube';
-const PROFILE_SEND = 200; // ids per list sent to the server (its limit)
+const PROFILE_SEND = 200; // ids per /api/docs lookup, and opened videos sent with the feed
+const VOTES_KEPT = 500; // likes and dislikes kept and sent in full (the server's limit)
 
 // ---------- DOM helpers ----------
 
@@ -270,8 +271,10 @@ function parseYoutubeInput(input) {
 const SEED = Math.random().toString(36).slice(2, 10) || 'seed';
 
 function saveLists() {
-  store.set('likes', state.likes.slice(-500));
-  store.set('dislikes', state.dislikes.slice(-500));
+  state.likes = state.likes.slice(-VOTES_KEPT);
+  state.dislikes = state.dislikes.slice(-VOTES_KEPT);
+  store.set('likes', state.likes);
+  store.set('dislikes', state.dislikes);
   store.set('seen', state.seen.slice(-200));
   store.set('later', state.later.slice(-500));
 }
@@ -640,8 +643,8 @@ async function home(token) {
   if (!current(token)) return;
   const prefs = knownPrefs(areas ? new Set(areas.flatMap((a) => a.categories.map((c) => c.id))) : null);
   const profile = {
-    like: state.likes.slice(-PROFILE_SEND),
-    dislike: state.dislikes.slice(-PROFILE_SEND),
+    like: state.likes.slice(-VOTES_KEPT),
+    dislike: state.dislikes.slice(-VOTES_KEPT),
     seen: state.seen.slice(-PROFILE_SEND),
     seed: SEED,
     ...curationBody(prefs),
@@ -681,8 +684,11 @@ async function home(token) {
 /** The viewer's own videos for Home: not yet opened, allowed by the format settings, newest first. */
 function myFeedPicks() {
   const formats = new Set(state.prefs.formats);
+  // A Short is known from its /shorts/ link; any other added video's length is unknown, so it
+  // shows unless both regular and long videos are turned off.
+  const allowed = (c) => (c.short ? formats.has('short') : formats.has('standard') || formats.has('long'));
   return state.custom
-    .filter((c) => !state.seen.includes(c.vid) && !state.dislikes.includes(c.vid) && formats.has(c.short ? 'short' : 'standard'))
+    .filter((c) => !state.seen.includes(c.vid) && !state.likes.includes(c.vid) && !state.dislikes.includes(c.vid) && allowed(c))
     .filter((c) => !state.prefs.muteChannels.includes(c.channel))
     .reverse()
     .map((c) => ({ vid: c.vid, title: c.title, channel: c.channel, custom: true, short: c.short, reason: c.short ? 'A Short you added' : 'A video you added' }));
