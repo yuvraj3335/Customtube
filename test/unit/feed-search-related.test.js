@@ -155,6 +155,10 @@ test('search: semantic, keyword fallback, weak flag, topic match and filters', (
   assert.ok(lectures.results.length > 0 && lectures.results.every((r) => ds.byVid.get(r.vid).content_type === 'lecture'));
   assert.ok(!sem.results.some((r) => r.vid === DUP_VID));
   assert.deepEqual(tokenize('How do the Transistors work?'), ['do', 'transistors', 'work']);
+  // duplicates collapse and the count is capped, so a hostile query can't multiply the work
+  assert.deepEqual(tokenize('ab ab ab ab'), ['ab']);
+  assert.equal(tokenize(Array.from({ length: 50 }, (_, i) => `w${i}`).join(' ')).length, 16);
+  assert.ok(tokenize('\uFDFA'.repeat(200)).length <= 16);
 
   // short words match whole words only; longer ones also match as prefixes
   const v = ds.byVid.get(vidOf(0, 2));

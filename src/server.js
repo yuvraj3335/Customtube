@@ -9,6 +9,7 @@ import { loadDataset, canonical } from './data.js';
 import { buildFeed, prepareFeed } from './feed.js';
 import { relatedFor } from './related.js';
 import { searchVideos } from './search.js';
+import { searchable } from './data.js';
 import { createEmbedder } from './embedder.js';
 import { createRateLimiter } from './ratelimit.js';
 import { LRUCache } from 'lru-cache';
@@ -268,11 +269,14 @@ export function createApp({
   // profiles get a tighter budget, per client and for the whole server.
   prepLimiter = createRateLimiter({ capacity: 10, refillPerSecond: 0.5 }),
   prepGlobalLimiter = createRateLimiter({ capacity: 40, refillPerSecond: 4 }),
+  // Everything else in the API is cheap, but not free: a generous per-client budget.
+  apiLimiter = createRateLimiter({ capacity: 240, refillPerSecond: 40 }),
   fetchImpl = globalThis.fetch,
   log = console,
   now = () => Date.now(),
 }) {
   const oembedCache = new LRUCache({ max: 2000 });
+  const relatedCache = new LRUCache({ max: 2000 });
   const staticFiles = loadStatic(publicDir);
   const shell = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
   if (!shell.includes('<!--HEAD-->')) throw new Error('public/index.html must contain <!--HEAD-->');
@@ -293,6 +297,17 @@ export function createApp({
     }
     return req.socket.remoteAddress || 'unknown';
   };
+
+  // Up next scans every video's embedding (~5 ms), and the answer never changes.
+  function cachedRelated(vid, n) {
+    const key = `${vid}:${n}`;
+    let out = relatedCache.get(key);
+    if (!out) {
+      out = relatedFor(ds, vid, n);
+      relatedCache.set(key, out);
+    }
+    return out;
+  }
 
   function getFeed(req, profile, curation) {
     const { seed, ...rest } = profile;
@@ -333,7 +348,16 @@ export function createApp({
       log.error?.(`oembed lookup for ${vid} returned ${res.status}`);
       throw new HttpError(502, 'YouTube lookup failed, try again');
     }
-    const body = await res.json().catch(() => null);
+    // oEmbed answers are a few hundred bytes; refuse anything absurd rather than buffering it.
+    const text = await res.text().catch(() => '');
+    let body = null;
+    if (text.length <= 64 * 1024) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = null;
+      }
+    }
     if (!body || typeof body.title !== 'string') throw new HttpError(502, 'YouTube returned an unexpected answer');
     const out = {
       vid,
@@ -483,7 +507,7 @@ export function createApp({
       if (!ds.byVid.has(vid)) throw new HttpError(404, 'no such video');
       const n = parseIntParam(params.get('n'), 'n', { min: 1, max: 40, def: 20 });
       sendJson(req, res, 200, {
-        items: relatedFor(ds, vid, n).map((r) => cardDto(ds.byVid.get(r.vid), { reason: r.reason })),
+        items: cachedRelated(vid, n).map((r) => cardDto(ds.byVid.get(r.vid), { reason: r.reason })),
       });
     },
 
@@ -501,7 +525,9 @@ export function createApp({
       assertNonEmpty(params, FILTER_KEYS);
       const q = (params.get('q') ?? '').trim();
       if (!q) throw badRequest('"q" is required');
-      if (q.length > MAX_QUERY) throw badRequest(`"q" must be at most ${MAX_QUERY} characters`);
+      // Normalization can expand a character into several words (U+FDFA becomes four), so the
+      // limit applies after it too.
+      if (q.length > MAX_QUERY || searchable(q).length > MAX_QUERY * 2) throw badRequest(`"q" must be at most ${MAX_QUERY} characters`);
       const filters = parseFilters(params, { hasMeta: ds.hasMeta, search: true });
       const limit = searchLimiter.take(clientKey(req));
       if (!limit.ok) {
@@ -539,8 +565,10 @@ export function createApp({
     if (pathname === '/healthz') return sendJson(req, res, 200, { ok: true, videos: ds.stats.videos, embedder: embedder.status() });
 
     if (pathname.startsWith('/api/')) {
-      const route = routes[pathname];
+      const route = Object.hasOwn(routes, pathname) ? routes[pathname] : null;
       if (!route) return sendJson(req, res, 404, { error: 'not found' });
+      const budget = apiLimiter.take(clientKey(req));
+      if (!budget.ok) return sendJson(req, res, 429, { error: 'too many requests, slow down' }, { 'retry-after': String(budget.retryAfter) });
       try {
         await route(req, res, url.searchParams);
       } catch (err) {
@@ -557,7 +585,7 @@ export function createApp({
 
     const page = appRoute(ds, pathname);
     if (!page) {
-      return send(req, res, 404, shell.replace('<!--HEAD-->', headTags({ title: `Not found · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION })), {
+      return send(req, res, 404, shell.replace('<!--HEAD-->', () => headTags({ title: `Not found · ${SITE_NAME}`, description: DEFAULT_DESCRIPTION })), {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
       });
@@ -568,7 +596,7 @@ export function createApp({
       image: page.image,
       url: base ? `${base}${page.canonicalPath ?? pathname}` : null,
     });
-    return send(req, res, page.status, shell.replace('<!--HEAD-->', head), {
+    return send(req, res, page.status, shell.replace('<!--HEAD-->', () => head), {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
     });

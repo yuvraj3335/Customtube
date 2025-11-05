@@ -1760,7 +1760,12 @@ document.addEventListener('keydown', (e) => {
 // ---------- boot ----------
 
 // Links from older builds or shares may use /#/path. Move them to real paths.
-if (location.hash.startsWith('#/')) history.replaceState(null, '', location.hash.slice(1));
+if (location.hash.startsWith('#/')) {
+  // Only same-origin paths: "#//evil.example" would otherwise be a different origin.
+  const moved = new URL(location.hash.slice(1), location.origin);
+  if (moved.origin === location.origin && !location.hash.startsWith('#//')) history.replaceState(null, '', moved.pathname + moved.search);
+  else history.replaceState(null, '', location.pathname + location.search);
+}
 
 api('/api/config')
   .then((c) => {

@@ -426,3 +426,34 @@ describe('API with YouTube metadata and limits', () => {
     assert.ok(Number(limited.headers.get('retry-after')) > 0);
   });
 });
+
+describe('round-3 hardening', () => {
+  let fx;
+  let app;
+  before(async () => {
+    fx = makeFixture();
+    const ds = loadDataset({ dataDir: fx.dataDir });
+    // a video summary with "$" replacement patterns must not splice the page into <head>
+    ds.byVid.get(vidOf(0, 1)).summary = "Great talk $` and $' and $&";
+    app = await start({ ds, embedder: fakeEmbedder(), apiLimiter: createRateLimiter({ capacity: 3, refillPerSecond: 0.001 }) });
+  });
+  after(async () => {
+    await app.close();
+    rmSync(fx.dir, { recursive: true, force: true });
+  });
+
+  test('"$" patterns in page data are inserted literally', async () => {
+    const watch = await app.get(`/watch/${vidOf(0, 1)}`);
+    assert.match(watch.body, /<meta name="description" content="Great talk \$` and \$&#39; and \$&amp;">/);
+    assert.equal(watch.body.match(/<!doctype html>/gi).length, 1);
+    const search = await app.get(`/search/${encodeURIComponent("x$'")}`);
+    assert.match(search.body, /<title>x\$&#39; - search · Custom Tube<\/title>/);
+  });
+
+  test('cheap API routes still have a per-client budget', async () => {
+    for (let i = 0; i < 3; i++) assert.equal((await app.get('/api/stats')).status, 200);
+    const r = await app.get('/api/stats');
+    assert.equal(r.status, 429);
+    assert.ok(Number(r.headers.get('retry-after')) > 0);
+  });
+});

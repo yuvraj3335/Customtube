@@ -16,11 +16,17 @@ const STOPWORDS = new Set(
   ),
 );
 
+// Each token costs a scan of every video, so a query keeps at most this many distinct ones.
+export const MAX_TOKENS = 16;
+
 export function tokenize(q) {
-  return searchable(q)
-    .trim()
-    .split(' ')
-    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+  const out = [];
+  for (const t of searchable(q).trim().split(' ')) {
+    if (t.length < 2 || STOPWORDS.has(t) || out.includes(t)) continue;
+    out.push(t);
+    if (out.length === MAX_TOKENS) break;
+  }
+  return out;
 }
 
 /** 0..1: how well the query's words appear in a video's own text. */

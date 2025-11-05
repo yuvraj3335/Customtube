@@ -54,7 +54,7 @@ is ready, search uses keywords only.
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
 | `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` |
-| `TRUST_PROXY` | `0` | How many proxies of yours sit in front of the server (e.g. `1` for one reverse proxy, `2` for a CDN plus a load balancer). Rate limits then key on the client address those proxies report; anything a client adds further left is ignored |
+| `TRUST_PROXY` | `0` | How many proxies of yours sit in front of the server (e.g. `1` for one reverse proxy, `2` for a CDN plus a load balancer). Rate limits then key on the client address those proxies report; anything a client adds further left is ignored. Only set it when the server can't be reached except through those proxies: a client that reaches it directly could forge the header and dodge every limit |
 
 ### YouTube metadata (for Shorts, lengths, dates and view counts)
 
