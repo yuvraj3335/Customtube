@@ -70,6 +70,12 @@ is ready, search uses keywords only.
 | `MAX_CONNECTIONS` | `2000` | Open connections the server accepts at once |
 | `TRUST_PROXY` | `0` | How many proxies of yours sit in front of the server (e.g. `1` for one reverse proxy, `2` for a CDN plus a load balancer). Rate limits then key on the client address those proxies report; anything a client adds further left is ignored. Only set it when the server can't be reached except through those proxies: a client that reaches it directly could forge the header and dodge every limit |
 
+### Deploying
+
+See [DEPLOY.md](DEPLOY.md): free hosting on Render (one click with `render.yaml`), Google Cloud Run,
+or any VM with Docker. `docker build -t customtube .` makes a self-contained image (app, data and
+search model) that runs in about 300 MB of RAM.
+
 ### Running it for real
 
 - `npm start` caps the V8 heap at 384 MB; the process settles around 400–500 MB RSS under load, so

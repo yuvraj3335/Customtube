@@ -1,0 +1,14 @@
+# Render Blueprint: New → Blueprint → pick this repo. Builds the Dockerfile on Render's free plan.
+services:
+  - type: web
+    name: customtube
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # Render's proxy adds the client address to X-Forwarded-For
+      - key: TRUST_PROXY
+        value: "1"
+      # set this to your https://<name>.onrender.com address (or custom domain) once you have it
+      - key: PUBLIC_URL
+        sync: false

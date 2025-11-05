@@ -1,0 +1,12 @@
+node_modules
+data
+.cache
+public/app.js
+public/styles.css
+public/licenses.txt
+test-results
+.git
+.claude
+*.log
+.env
+.DS_Store
