@@ -159,7 +159,8 @@ function appRoute(ds, pathname) {
     }
     return plain(`${q.slice(0, 80)} - search`);
   }
-  const fixed = { '/topics': 'Topics', '/browse': 'All videos', '/liked': 'Liked', '/later': 'Watch later', '/history': 'History', '/about': 'About', '/settings': 'Customize your feed', '/mine': 'My videos' };
+  const fixed = { '/topics': 'Topics', '/browse': 'All videos', '/liked': 'Liked', '/later': 'Watch later', '/history': 'History', '/about': 'About', '/settings': 'Customize your feed', '/mine': 'My videos', '/library': 'Library', '/lists': 'Lists' };
+  if (/^\/list\/[a-z0-9]{8}$/.test(pathname)) return plain('List');
   return fixed[pathname] ? plain(fixed[pathname]) : null;
 }
 

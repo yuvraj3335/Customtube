@@ -96,6 +96,7 @@ const state = {
   frames: store.get('frames', true) !== false,
   prefs: null, // feed curation, see loadPrefs()
   custom: [], // videos and Shorts the viewer added by URL
+  lists: [], // the viewer's own playlists: { id, name, vids, created }
 };
 
 // ---------- feed curation (this browser only) ----------
@@ -162,6 +163,31 @@ function sanitizeCustom(raw) {
 }
 state.prefs = sanitizePrefs(store.get('prefs', null));
 state.custom = sanitizeCustom(store.get('custom', []));
+const LIST_ID_RE = /^[a-z0-9]{8}$/;
+function sanitizeLists(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const ids = new Set();
+  for (const l of raw) {
+    if (!l || !LIST_ID_RE.test(l.id) || ids.has(l.id)) continue;
+    ids.add(l.id);
+    const name = typeof l.name === 'string' ? l.name.trim().slice(0, 80) : '';
+    out.push({ id: l.id, name: name || 'Untitled list', vids: [...new Set(cleanIds(l.vids))].slice(0, 500), created: typeof l.created === 'string' ? l.created : new Date().toISOString() });
+  }
+  return out.slice(0, 100);
+}
+state.lists = sanitizeLists(store.get('lists', []));
+const saveLists2 = () => store.set('lists', state.lists);
+const newListId = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return [...bytes].map((b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
+};
+function createList(name) {
+  const list = { id: newListId(), name: String(name).trim().slice(0, 80) || 'Untitled list', vids: [], created: new Date().toISOString() };
+  state.lists.push(list);
+  saveLists2();
+  return list;
+}
 const savePrefs = () => store.set('prefs', state.prefs);
 const saveCustom = () => store.set('custom', state.custom);
 
@@ -324,7 +350,7 @@ function card(item) {
   const meta = [item.channel, item.yt?.views != null ? `${compact(item.yt.views)} views` : null, item.yt?.published ? ago(item.yt.published) : null].filter(Boolean).join(' · ');
   return h(
     'article',
-    { class: 'card', dataset: { vid: item.vid } },
+    { class: 'card', dataset: { vid: item.vid, channel: item.channel || '' } },
     h(
       'a',
       { class: 'card-link', href: `/watch/${item.vid}`, title: item.reason || null },
@@ -340,7 +366,134 @@ function card(item) {
       ),
     ),
     laterButton(item.vid),
+    h('button', { type: 'button', class: 'more-btn', 'aria-label': `More actions for ${item.title}`, 'aria-haspopup': 'menu', dataset: { more: item.vid } }, '⋯'),
   );
+}
+
+// ---------- card menu and "Save to list" dialog ----------
+
+let openMenu = null;
+function closeMenu() {
+  if (!openMenu) return;
+  openMenu.el.remove();
+  openMenu.button?.setAttribute('aria-expanded', 'false');
+  openMenu.button?.focus({ preventScroll: true });
+  openMenu = null;
+}
+
+function showMenu(button, items) {
+  closeMenu();
+  const menu = h(
+    'div',
+    { class: 'menu', role: 'menu' },
+    items.map(([label, run]) =>
+      h('button', {
+        type: 'button',
+        role: 'menuitem',
+        class: 'menu-item',
+        onclick: () => {
+          closeMenu();
+          run();
+        },
+      }, label),
+    ),
+  );
+  document.body.append(menu);
+  const r = button.getBoundingClientRect();
+  const w = menu.offsetWidth;
+  menu.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + scrollX}px`;
+  menu.style.top = `${r.bottom + 4 + scrollY}px`;
+  button.setAttribute('aria-expanded', 'true');
+  openMenu = { el: menu, button };
+  menu.querySelector('button')?.focus();
+}
+
+function cardMenu(button) {
+  const el = button.closest('.card');
+  const vid = el.dataset.vid;
+  const channel = el.dataset.channel;
+  const later = state.later.includes(vid);
+  showMenu(button, [
+    [later ? 'Remove from Watch later' : 'Save to Watch later', () => toggleLater(vid)],
+    ['Save to list…', () => saveToListDialog(vid)],
+    [
+      'Not interested',
+      () => {
+        if (!state.dislikes.includes(vid)) setVote(vid, 'dislike');
+        el.remove();
+        toast('Hidden. Similar videos show up less.', () => {
+          setVote(vid, 'dislike');
+          route();
+        });
+      },
+    ],
+    ...(channel
+      ? [
+          [
+            `Hide ${channel}`,
+            () => {
+              if (!state.prefs.muteChannels.includes(channel)) toggleChannel(channel);
+              for (const c of view.querySelectorAll('.card')) if (c.dataset.channel === channel) c.remove();
+              toast(`${channel} won't appear in your feed`, () => {
+                toggleChannel(channel);
+                route();
+              });
+            },
+          ],
+        ]
+      : []),
+  ]);
+}
+
+function closeDialog() {
+  const d = $('#dialog');
+  d.hidden = true;
+  d.replaceChildren();
+}
+
+function saveToListDialog(vid) {
+  const d = $('#dialog');
+  const render = () => {
+    const name = h('input', { type: 'text', id: 'new-list-name', placeholder: 'New list name', maxlength: 80, 'aria-label': 'New list name' });
+    const form = h('form', { class: 'addform' }, name, h('button', { type: 'submit', class: 'pill on' }, 'Create'));
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!name.value.trim()) return;
+      const list = createList(name.value);
+      list.vids.push(vid);
+      saveLists2();
+      toast(`Saved to ${list.name}`);
+      render();
+    });
+    d.replaceChildren(
+      h(
+        'div',
+        { class: 'dialog-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dialog-title' },
+        h('h2', { id: 'dialog-title' }, 'Save to…'),
+        state.lists.length
+          ? h(
+              'div',
+              { class: 'list-options' },
+              state.lists.map((l) => {
+                const box = h('input', { type: 'checkbox', dataset: { list: l.id } });
+                box.checked = l.vids.includes(vid);
+                box.addEventListener('change', () => {
+                  if (box.checked && !l.vids.includes(vid)) l.vids.push(vid);
+                  if (!box.checked) l.vids = l.vids.filter((v) => v !== vid);
+                  saveLists2();
+                });
+                return h('label', { class: 'option' }, box, h('span', {}, l.name), h('span', { class: 'count' }, l.vids.length));
+              }),
+            )
+          : h('p', { class: 'hint' }, 'No lists yet. Make one:'),
+        form,
+        h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'pill', onclick: closeDialog }, 'Done')),
+      ),
+    );
+  };
+  render();
+  d.hidden = false;
+  (d.querySelector('input[type="checkbox"]') || d.querySelector('#new-list-name'))?.focus();
 }
 
 function playAllLink(getVids) {
@@ -601,6 +754,22 @@ async function areaPage(token, id) {
   await infiniteGrid(section, (offset) => api(`/api/list${qs({ area: id, ...currentFilters(), offset, n: 24 })}`), { empty: 'No videos match these filters.', token });
 }
 
+// Ready-made views of the whole collection; the last three need YouTube metadata.
+const QUICK_LINKS = [
+  ['Recently recommended', '/browse?sort=recent'],
+  ['Most HN recommenders', '/browse?sort=hn'],
+  ['Hide news', '/browse?evergreen=1'],
+  ['Lectures', '/browse?type=lecture'],
+  ['Documentaries', '/browse?type=documentary'],
+  ['Hidden gems', '/browse?gems=1', true],
+  ['Over an hour', '/browse?dur=xlong', true],
+  ['Under 4 minutes', '/browse?dur=short', true],
+];
+function browseTitle() {
+  const href = location.pathname + location.search;
+  return QUICK_LINKS.find(([, h2]) => h2 === href)?.[0] ?? 'All videos';
+}
+
 async function topicsPage(token) {
   const areas = await getBrowse();
   if (!current(token)) return;
@@ -609,6 +778,11 @@ async function topicsPage(token) {
       'section',
       {},
       pageHead('Topics', `${plural(areas.reduce((n, a) => n + a.categories.length, 0), 'topic')} in ${areas.length} areas`),
+      h(
+        'div',
+        { class: 'chips quick' },
+        QUICK_LINKS.filter(([, , meta]) => !meta || config.has_youtube_metadata).map(([label, href]) => h('a', { class: 'chip', href }, label)),
+      ),
       h(
         'div',
         { class: 'areas' },
@@ -713,7 +887,7 @@ async function watchPage(token, vid) {
           'div',
           { class: 'owner' },
           h('div', {}, h('b', {}, d.channel), h('p', { class: 'sub' }, facts.join(' · '))),
-          h('div', { class: 'actions' }, voteBtn('like'), voteBtn('dislike'), laterPill, hideChannel, h('a', { class: 'pill', href: `https://www.youtube.com/watch?v=${d.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
+          h('div', { class: 'actions' }, voteBtn('like'), voteBtn('dislike'), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: () => saveToListDialog(d.vid) }, 'Save to list'), hideChannel, h('a', { class: 'pill', href: `https://www.youtube.com/watch?v=${d.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
         ),
         d.duplicate_of ? h('p', { class: 'note' }, 'This is another upload of ', h('a', { href: `/watch/${d.duplicate_of}` }, 'a video in the collection'), '.') : null,
         d.yt?.embeddable === false ? h('p', { class: 'note' }, 'The uploader doesn’t allow this video to play on other sites. Open it on YouTube to watch.') : null,
@@ -796,7 +970,7 @@ function customWatchPage(c) {
           'div',
           { class: 'owner' },
           h('div', {}, h('b', {}, c.channel || 'Unknown channel'), h('p', { class: 'sub' }, `${c.short ? 'Short' : 'Video'} you added · not from Hacker News`)),
-          h('div', { class: 'actions' }, laterPill, c.channel ? channelButton(c.channel) : null, remove, h('a', { class: 'pill', href: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
+          h('div', { class: 'actions' }, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: () => saveToListDialog(c.vid) }, 'Save to list'), c.channel ? channelButton(c.channel) : null, remove, h('a', { class: 'pill', href: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
         ),
       ),
     ),
@@ -843,6 +1017,24 @@ async function searchPage(token, q) {
   );
 }
 
+/** Cards for a list of ids in order: your own videos from this browser, the rest from the server. */
+async function resolveCards(vids, token) {
+  const mine = new Map(state.custom.map((c) => [c.vid, c]));
+  const lookup = [...new Set(vids.filter((vid) => !mine.has(vid)))];
+  const found = new Map();
+  for (let i = 0; i < lookup.length; i += PROFILE_SEND) {
+    const res = await api(`/api/docs${qs({ vids: lookup.slice(i, i + PROFILE_SEND).join(',') })}`);
+    if (!current(token)) return null;
+    for (const item of res.items) found.set(item.vid, item);
+  }
+  return vids
+    .map((vid) => {
+      const c = mine.get(vid);
+      return c ? { vid, title: c.title, channel: c.channel, custom: true, short: c.short } : found.get(vid);
+    })
+    .filter(Boolean);
+}
+
 async function savedPage(token, { title, empty, vids, extra }) {
   const newestFirst = vids.slice().reverse();
   const section = h('section', {}, pageHead(title, null, vids.length ? playAllLink(vidsOnPage) : null, extra || null));
@@ -851,21 +1043,8 @@ async function savedPage(token, { title, empty, vids, extra }) {
     section.append(h('p', { class: 'status' }, empty));
     return;
   }
-  // Videos you added come from this browser; the rest are looked up, at most 200 per request.
-  const mine = new Map(state.custom.map((c) => [c.vid, c]));
-  const lookup = newestFirst.filter((vid) => !mine.has(vid));
-  const found = new Map();
-  for (let i = 0; i < lookup.length; i += PROFILE_SEND) {
-    const res = await api(`/api/docs${qs({ vids: lookup.slice(i, i + PROFILE_SEND).join(',') })}`);
-    if (!current(token)) return;
-    for (const item of res.items) found.set(item.vid, item);
-  }
-  const items = newestFirst
-    .map((vid) => {
-      const c = mine.get(vid);
-      return c ? { vid, title: c.title, channel: c.channel, custom: true, short: c.short } : found.get(vid);
-    })
-    .filter(Boolean);
+  const items = await resolveCards(newestFirst, token);
+  if (!items) return;
   const sub = h('p', { class: 'sub' }, plural(items.length, 'video'));
   section.querySelector('.pagehead > div').append(sub);
   section.append(items.length ? h('div', { class: 'grid' }, items.map(card)) : h('p', { class: 'status' }, empty));
@@ -1141,9 +1320,9 @@ async function settingsPage(token) {
   );
 }
 
-const PROFILE_VERSION = 1;
+const PROFILE_VERSION = 2; // 2 added lists
 function exportProfile() {
-  const data = { app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom };
+  const data = { app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom, lists: state.lists };
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   const a = h('a', { href: url, download: `customtube-${new Date().toISOString().slice(0, 10)}.json` });
   document.body.append(a);
@@ -1153,15 +1332,18 @@ function exportProfile() {
 }
 function importProfile(data) {
   if (!data || data.app !== 'customtube') throw new Error('not a Custom Tube export');
+  if (!Number.isInteger(data.version) || data.version < 1 || data.version > PROFILE_VERSION) throw new Error(`unsupported export version ${data.version}`);
   state.likes = cleanIds(data.likes);
   state.dislikes = cleanIds(data.dislikes).filter((v) => !state.likes.includes(v));
   state.later = cleanIds(data.later);
   state.seen = cleanIds(data.seen).slice(-200);
   state.prefs = sanitizePrefs(data.prefs);
   state.custom = sanitizeCustom(data.custom);
+  state.lists = sanitizeLists(data.lists);
   saveLists();
   savePrefs();
   saveCustom();
+  saveLists2();
 }
 
 // ---------- my videos ----------
@@ -1212,6 +1394,155 @@ async function minePage() {
   );
 }
 
+// ---------- library and lists ----------
+
+function listCover(vids) {
+  return h('div', { class: 'mosaic' }, vids.slice(0, 4).map((v) => thumbImg(v)), vids.length ? null : h('span', { class: 'mosaic-empty' }, 'Empty'));
+}
+function listCard(l) {
+  return h('a', { class: 'listcard', href: `/list/${l.id}`, dataset: { listId: l.id } }, listCover(l.vids), h('h3', { class: 'card-title' }, l.name), h('p', { class: 'card-meta' }, plural(l.vids.length, 'video')));
+}
+function newListForm(after) {
+  const name = h('input', { type: 'text', id: 'create-list-name', placeholder: 'New list name', maxlength: 80, 'aria-label': 'New list name' });
+  const form = h('form', { class: 'addform', id: 'create-list' }, name, h('button', { type: 'submit', class: 'pill on' }, 'Create list'));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!name.value.trim()) return;
+    const l = createList(name.value);
+    toast(`Created ${l.name}`);
+    after(l);
+  });
+  return form;
+}
+
+async function libraryPage(token) {
+  document.title = `Library · ${SITE}`;
+  const sections = [
+    ['Watch later', '/later', state.later.slice().reverse()],
+    ['Liked', '/liked', state.likes.slice().reverse()],
+    ['History', '/history', state.seen.slice().reverse()],
+    ['My videos', '/mine', state.custom.map((c) => c.vid).reverse()],
+  ];
+  const preview = sections.flatMap(([, , vids]) => vids.slice(0, 4));
+  const items = await resolveCards(preview, token);
+  if (!items) return;
+  const byVid = new Map(items.map((i) => [i.vid, i]));
+  view.replaceChildren(
+    h(
+      'section',
+      { class: 'library' },
+      pageHead('Library', 'Everything here lives in this browser only.'),
+      h(
+        'section',
+        { class: 'shelf' },
+        h('div', { class: 'shelf-head' }, h('h2', {}, 'Lists'), h('a', { href: '/lists' }, state.lists.length ? `All ${state.lists.length}` : 'Make one')),
+        state.lists.length ? h('div', { class: 'grid' }, state.lists.slice(-4).reverse().map(listCard)) : h('p', { class: 'hint' }, 'Group videos into your own playlists with “Save to list”.'),
+      ),
+      sections.map(([title, href, vids]) => {
+        const cards = vids.slice(0, 4).map((v) => byVid.get(v)).filter(Boolean);
+        return h(
+          'section',
+          { class: 'shelf' },
+          h('div', { class: 'shelf-head' }, h('h2', {}, title, h('span', { class: 'count' }, vids.length)), h('a', { href }, href === '/mine' ? 'Add videos' : 'See all')),
+          cards.length ? h('div', { class: 'grid' }, cards.map(card)) : h('p', { class: 'hint' }, 'Nothing here yet.'),
+        );
+      }),
+    ),
+  );
+}
+
+function listsPage() {
+  document.title = `Lists · ${SITE}`;
+  view.replaceChildren(
+    h(
+      'section',
+      {},
+      h('a', { class: 'crumb', href: '/library' }, 'Library'),
+      pageHead('Lists', 'Your own playlists. Play any of them on YouTube.'),
+      newListForm((l) => navigate(`/list/${l.id}`)),
+      state.lists.length ? h('div', { class: 'grid lists' }, state.lists.slice().reverse().map(listCard)) : h('p', { class: 'status' }, 'No lists yet.'),
+    ),
+  );
+}
+
+async function listPageOne(token, id) {
+  const list = state.lists.find((l) => l.id === id);
+  if (!list) return notFound('This list doesn’t exist in this browser.');
+  document.title = `${list.name} · ${SITE}`;
+  const items = await resolveCards(list.vids, token);
+  if (!items) return;
+  const save = () => saveLists2();
+  const rename = h('button', {
+    type: 'button',
+    class: 'pill',
+    id: 'rename-list',
+    onclick: () => {
+      const name = prompt('Rename list', list.name);
+      if (name === null || !name.trim()) return;
+      list.name = name.trim().slice(0, 80);
+      save();
+      route();
+    },
+  }, 'Rename');
+  const del = h('button', {
+    type: 'button',
+    class: 'pill',
+    id: 'delete-list',
+    onclick: () => {
+      const index = state.lists.indexOf(list);
+      state.lists.splice(index, 1);
+      save();
+      navigate('/lists');
+      toast(`Deleted ${list.name}`, () => {
+        state.lists.splice(index, 0, list);
+        save();
+        navigate(`/list/${list.id}`);
+      });
+    },
+  }, 'Delete');
+  const move = (vid, delta) => {
+    const i = list.vids.indexOf(vid);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= list.vids.length) return;
+    [list.vids[i], list.vids[j]] = [list.vids[j], list.vids[i]];
+    save();
+    route();
+  };
+  const rows = items.map((item, i) =>
+    h(
+      'li',
+      { class: 'list-row' },
+      h('span', { class: 'num' }, i + 1),
+      card(item),
+      h(
+        'div',
+        { class: 'row-actions' },
+        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': `Move ${item.title} up`, disabled: i === 0, onclick: () => move(item.vid, -1) }, '↑'),
+        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': `Move ${item.title} down`, disabled: i === items.length - 1, onclick: () => move(item.vid, 1) }, '↓'),
+        h('button', {
+          type: 'button',
+          class: 'icon-btn small',
+          'aria-label': `Remove ${item.title} from this list`,
+          onclick: () => {
+            list.vids = list.vids.filter((v) => v !== item.vid);
+            save();
+            route();
+          },
+        }, '✕'),
+      ),
+    ),
+  );
+  view.replaceChildren(
+    h(
+      'section',
+      {},
+      h('a', { class: 'crumb', href: '/lists' }, 'Lists'),
+      pageHead(list.name, plural(items.length, 'video'), items.length ? playAllLink(() => list.vids) : null, rename, del),
+      items.length ? h('ol', { class: 'list rows' }, rows) : h('p', { class: 'status' }, 'This list is empty. Use “Save to list” on any video.'),
+    ),
+  );
+}
+
 function notFound(message = 'Page not found.') {
   document.title = `Not found · ${SITE}`;
   view.replaceChildren(h('section', { class: 'empty' }, h('h1', {}, 'Not found'), h('p', {}, message), h('a', { class: 'pill', href: '/' }, 'Go home')));
@@ -1236,7 +1567,15 @@ async function route() {
   while (cleanups.length) cleanups.pop()();
   selected = -1;
   const { pathname } = location;
-  for (const a of document.querySelectorAll('[data-nav]')) a.classList.toggle('on', a.dataset.nav === pathname);
+  closeMenu();
+  closeDialog();
+  const section = ['/liked', '/later', '/history', '/mine', '/lists', '/library'].includes(pathname) || pathname.startsWith('/list/') ? '/library' : pathname.startsWith('/c/') || pathname.startsWith('/a/') || pathname === '/browse' ? '/topics' : pathname;
+  for (const a of document.querySelectorAll('[data-nav]')) {
+    const on = a.dataset.nav === section;
+    a.classList.toggle('on', on);
+    if (on) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
   if (!pathname.startsWith('/search/')) $('#q').value = '';
   view.replaceChildren(h('p', { class: 'status' }, 'Loading…'));
   window.scrollTo(0, 0);
@@ -1248,7 +1587,10 @@ async function route() {
     else if ((m = /^\/a\/([a-z0-9-]+)$/.exec(pathname))) await areaPage(token, m[1]);
     else if ((m = /^\/search\/(.+)$/.exec(pathname))) await searchPage(token, decodeURIComponent(m[1]));
     else if (pathname === '/topics') await topicsPage(token);
-    else if (pathname === '/browse') await listPage(token, { title: 'All videos', sub: 'Every video in the collection, best first unless you sort it.', params: {} });
+    else if (pathname === '/browse') await listPage(token, { title: browseTitle(), sub: 'From the whole collection. Change the filters below to narrow it.', params: {}, crumb: h('a', { class: 'crumb', href: '/topics' }, 'Topics') });
+    else if (pathname === '/library') await libraryPage(token);
+    else if (pathname === '/lists') listsPage();
+    else if ((m = /^\/list\/([a-z0-9]{8})$/.exec(pathname))) await listPageOne(token, m[1]);
     else if (pathname === '/liked') await savedPage(token, { title: 'Liked', empty: 'Videos you like show up here and shape your Home feed.', vids: state.likes });
     else if (pathname === '/later') await savedPage(token, { title: 'Watch later', empty: 'Save videos with the clock button.', vids: state.later });
     else if (pathname === '/history') await historyPage(token);
@@ -1265,6 +1607,17 @@ addEventListener('popstate', route);
 
 document.addEventListener('click', (e) => {
   if (!(e.target instanceof Element)) return;
+  if (openMenu && !e.target.closest('.menu')) closeMenu();
+  const more = e.target.closest('[data-more]');
+  if (more) {
+    e.preventDefault();
+    cardMenu(more);
+    return;
+  }
+  if (e.target.id === 'dialog') {
+    closeDialog();
+    return;
+  }
   const later = e.target.closest('[data-later]');
   if (later) {
     e.preventDefault();
@@ -1306,12 +1659,24 @@ $('#theme').addEventListener('click', () => {
 });
 
 let toastTimer;
-function toast(message) {
+function toast(message, undo) {
   const t = $('#toast');
-  t.textContent = message;
+  t.replaceChildren(h('span', {}, message));
+  if (undo) {
+    t.append(
+      h('button', {
+        type: 'button',
+        class: 'toast-undo',
+        onclick: () => {
+          t.classList.remove('on');
+          undo();
+        },
+      }, 'Undo'),
+    );
+  }
   t.classList.add('on');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('on'), 2200);
+  toastTimer = setTimeout(() => t.classList.remove('on'), undo ? 5000 : 2200);
 }
 
 let selected = -1;
@@ -1338,6 +1703,15 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (typing) el.blur();
     toggleHelp(false);
+    closeMenu();
+    closeDialog();
+    return;
+  }
+  if (openMenu && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    const items = [...openMenu.el.querySelectorAll('.menu-item')];
+    const i = items.indexOf(document.activeElement);
+    items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
     return;
   }
   if (typing) return;

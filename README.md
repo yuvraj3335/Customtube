@@ -17,6 +17,12 @@ filter and mix from there.
   - export everything to a file and import it in another browser
 - **My videos** adds any YouTube video or Short by pasting its link. They join your feed, as often as
   you set.
+- **Every card's ⋯ menu**: Watch later, Save to list, Not interested (with undo), Hide this channel.
+- **Library** keeps Watch later, Liked, History, My videos and your **Lists**: your own playlists,
+  which you can reorder and play on YouTube in one click ("Play all" works on every page, up to 50
+  videos, no account needed).
+- **Topics** has quick views of the whole collection: recently recommended, most recommended,
+  lectures, documentaries, and (with YouTube metadata) hidden gems, over an hour, under 4 minutes.
 - **Search** matches by meaning (the `bge-small-en-v1.5` model the data's vectors were made with), plus
   keywords and topics, with filters and sorting.
 - **Every video page** shows what HN actually said about it, linking back to the comments, with "Up
@@ -48,7 +54,7 @@ is ready, search uses keywords only.
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
 | `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` |
-| `TRUST_PROXY` | off | `1` uses the first `X-Forwarded-For` address for rate limits (only behind your own proxy) |
+| `TRUST_PROXY` | `0` | How many proxies of yours sit in front of the server (e.g. `1` for one reverse proxy, `2` for a CDN plus a load balancer). Rate limits then key on the client address those proxies report; anything a client adds further left is ignored |
 
 ### YouTube metadata (for Shorts, lengths, dates and view counts)
 

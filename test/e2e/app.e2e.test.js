@@ -190,6 +190,74 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.ok(!body.items.some((x) => x.channel === channel));
   });
 
+  test('card menu: not interested hides the card and can be undone; hide channel', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const first = page.locator('.card').first();
+    const vid = await first.getAttribute('data-vid');
+    await first.hover();
+    await first.locator('.more-btn').click();
+    await page.waitForSelector('.menu');
+    assert.equal(await page.evaluate(() => document.activeElement.className), 'menu-item', 'focus moves into the menu');
+    await page.click('.menu-item:has-text("Not interested")');
+    assert.equal(await page.locator(`.card[data-vid="${vid}"]`).count(), 0);
+    assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:dislikes')))).includes(vid));
+    await page.click('.toast-undo');
+    await page.waitForSelector(`.card[data-vid="${vid}"]`);
+    assert.ok(!(await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:dislikes')))).includes(vid));
+
+    const second = page.locator('.card').nth(1);
+    const channel = await second.getAttribute('data-channel');
+    await second.hover();
+    await second.locator('.more-btn').click();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.menu').count(), 0, 'Escape closes the menu');
+    await second.hover();
+    await second.locator('.more-btn').click();
+    await page.click(`.menu-item:has-text("Hide ")`);
+    assert.equal(await page.locator(`.card[data-channel="${channel.replace(/"/g, '\\"')}"]`).count(), 0);
+    assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:prefs')).muteChannels)).includes(channel));
+    await page.evaluate(() => localStorage.removeItem('customtube:prefs'));
+  });
+
+  test('lists: save from a card, reorder, remove, play all, delete with undo', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const vids = await page.$$eval('.card', (els) => els.slice(0, 3).map((e) => e.dataset.vid));
+    for (const [i, vid] of vids.entries()) {
+      const c = page.locator(`.card[data-vid="${vid}"]`);
+      await c.hover();
+      await c.locator('.more-btn').click();
+      await page.click('.menu-item:has-text("Save to list")');
+      if (i === 0) {
+        await page.fill('#new-list-name', 'E2E list');
+        await page.press('#new-list-name', 'Enter');
+      } else {
+        await page.check('#dialog input[type="checkbox"]');
+      }
+      await page.click('#dialog button:has-text("Done")');
+    }
+    await page.click('nav.tabs a[href="/library"]');
+    await page.click('.listcard');
+    await page.waitForSelector('.list-row');
+    const order = () => page.$$eval('.list-row .card', (els) => els.map((e) => e.dataset.vid));
+    assert.deepEqual(await order(), vids);
+    await page.click('.list-row >> nth=0 >> [aria-label^="Move"][aria-label$="down"]');
+    await page.waitForFunction((v) => document.querySelector('.list-row .card')?.dataset.vid === v, vids[1]);
+    assert.deepEqual(await order(), [vids[1], vids[0], vids[2]]);
+    await page.click('.list-row >> nth=2 >> [aria-label$="from this list"]');
+    await page.waitForFunction(() => document.querySelectorAll('.list-row').length === 2);
+    await page.click('.playall, a.pill:has-text("Play all")');
+    // the click handler fills in the playlist link before the (intercepted) navigation
+    const href = await page.getAttribute('a.pill:has-text("Play all")', 'href');
+    assert.equal(href, `https://www.youtube.com/watch_videos?video_ids=${vids[1]},${vids[0]}`);
+    await page.click('#delete-list');
+    await page.waitForURL('**/lists');
+    await page.click('.toast-undo');
+    await page.waitForSelector('.list-row');
+    assert.equal(await page.locator('.list-row').count(), 2);
+  });
+
   test('my videos: add a Short by URL, see it in Home, play it', async () => {
     // Allow every kind again so the feed is not empty with the strict test settings.
     await page.evaluate(() => localStorage.removeItem('customtube:prefs'));
@@ -205,6 +273,10 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.click('#add-video button[type="submit"]');
     assert.match(await page.textContent('#add-status'), /doesn’t look like a YouTube link/);
 
+    await page.click('nav.tabs a[href="/"]');
+    await page.waitForSelector(`.card[data-vid="${ADDED_VID}"]`);
+    await page.goto(base + '/library');
+    await page.waitForSelector(`.shelf .card[data-vid="${ADDED_VID}"]`);
     await page.click('nav.tabs a[href="/"]');
     await page.waitForSelector(`.card[data-vid="${ADDED_VID}"]`);
     await page.locator(`.card[data-vid="${ADDED_VID}"] .card-link`).click();
@@ -239,7 +311,8 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.goto(base + '/mine');
     await page.waitForSelector(`.card[data-vid="${ADDED_VID}"]`);
     await page.locator(`.card[data-vid="${ADDED_VID}"] .later-btn`).click({ force: true });
-    await page.click('nav.tabs a[href="/later"]');
+    await page.click('nav.tabs a[href="/library"]');
+    await page.click('.shelf-head a[href="/later"]');
     await page.waitForSelector(`.card[data-vid="${ADDED_VID}"]`);
     await page.locator(`.card[data-vid="${ADDED_VID}"] .later-btn`).click({ force: true });
   });
@@ -270,9 +343,11 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.keyboard.press('j');
     const vid = await page.locator('.card.kbd').getAttribute('data-vid');
     await page.keyboard.press('w');
-    await page.click('nav.tabs a[href="/later"]');
+    await page.click('nav.tabs a[href="/library"]');
+    await page.click('.shelf-head a[href="/later"]');
     await page.waitForSelector(`.card[data-vid="${vid}"]`);
-    await page.click('nav.tabs a[href="/history"]');
+    await page.click('nav.tabs a[href="/library"]');
+    await page.click('.shelf-head a[href="/history"]');
     await page.waitForSelector('#clear-history');
     await page.click('#clear-history');
     await page.waitForSelector('text=Videos you open show up here.');
