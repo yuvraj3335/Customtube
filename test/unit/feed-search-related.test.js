@@ -182,14 +182,28 @@ test('search: semantic, keyword fallback, weak flag, topic match and filters', (
   assert.equal(tokenize(Array.from({ length: 50 }, (_, i) => `w${i}`).join(' ')).length, 16);
   assert.ok(tokenize('\uFDFA'.repeat(200)).length <= 16);
 
-  // short words match whole words only; longer ones also match as prefixes
+  // results never show a near-copy twice, but episodes ("number 1", "number 2") all stay
+  assert.ok(sem.results.length >= 10, `${sem.results.length} results`);
+  const copy = ds.byVid.get(vidOf(3, 1));
+  const before = copy.search.title;
+  copy.search.title = ds.byVid.get(vidOf(3, 2)).search.title; // same words and number as c3v2
+  const collapsed = searchVideos(ds, { q: 'physics', qvec: qvec(3), filters: { sort: 'relevance' } }).results.map((r) => r.vid);
+  assert.equal(collapsed.filter((v) => v === vidOf(3, 1) || v === vidOf(3, 2)).length, 1);
+  copy.search.title = before;
+
+  // whole words only, at any length
   const v = ds.byVid.get(vidOf(0, 2));
   v.search.title = ' going google go somewhere ';
   const go = searchVideos(ds, { q: 'go', qvec: null, filters: { sort: 'relevance' } });
   assert.deepEqual(go.results.map((r) => r.vid), [vidOf(0, 2)]);
-  v.search.title = ' going google ';
+  v.search.title = ' going google demoscene ';
   assert.equal(searchVideos(ds, { q: 'go', qvec: null, filters: { sort: 'relevance' } }).results.length, 0);
-  assert.equal(searchVideos(ds, { q: 'goin', qvec: null, filters: { sort: 'relevance' } }).results[0].vid, vidOf(0, 2));
+  assert.equal(searchVideos(ds, { q: 'goog', qvec: null, filters: { sort: 'relevance' } }).results.length, 0, 'no prefix matches');
+  // singular and plural forms match each other
+  v.search.title = ' how a transistor works ';
+  assert.equal(searchVideos(ds, { q: 'transistors', qvec: null, filters: { sort: 'relevance' } }).results[0].vid, vidOf(0, 2));
+  v.search.title = ' many demos ';
+  assert.equal(searchVideos(ds, { q: 'demo', qvec: null, filters: { sort: 'relevance' } }).results[0].vid, vidOf(0, 2));
 });
 
 test('related: shared recommenders first, then nearest by embedding, never itself or a duplicate', (t) => {

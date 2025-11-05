@@ -4,7 +4,7 @@
 
 import { searchable } from './data.js';
 import { matchesFilters, sortVideos } from './filters.js';
-import { dotRowVec } from './vec.js';
+import { dotRows, dotRowVec } from './vec.js';
 
 // Calibrated on the real export: on-topic queries score 0.75-0.85 against their best match,
 // nonsense queries about 0.64.
@@ -29,29 +29,82 @@ export function tokenize(q) {
   return out;
 }
 
-/** 0..1: how well the query's words appear in a video's own text. */
-function keywordScore(v, tokens, phrase) {
-  if (!tokens.length) return 0;
+/** The forms a query word may take in a video's text: itself, and singular/plural. */
+function wordForms(t) {
+  const stem = t.length > 4 && t.endsWith('es') ? t.slice(0, -2) : t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t;
+  return [...new Set([t, stem, `${stem}s`, `${stem}es`])].map((w) => ` ${w} `);
+}
+
+/**
+ * How well the query's words appear in a video's own text: `score` 0..1, and `full` when every
+ * word is in its title, tags or channel. Whole words only ("demos" doesn't match "demoscene",
+ * "go" doesn't match "google"), allowing singular/plural ("transistors" matches "transistor").
+ */
+function keywordScore(v, tokens, forms, phrase) {
+  if (!tokens.length) return { score: 0, full: false };
   const s = v.search;
   let score = phrase.length > 4 && s.title.includes(phrase) ? 2 : 0;
-  for (const t of tokens) {
-    // Words of 4+ letters also match as prefixes ("compil" -> "compilers"); shorter ones must
-    // match whole words, so "go" doesn't hit "google".
-    const word = t.length >= 4 ? ` ${t}` : ` ${t} `;
-    if (s.title.includes(word)) score += 1.5;
-    if (s.topics.includes(word)) score += 1;
-    if (s.channel.includes(word)) score += 1;
-    if (s.summary.includes(word)) score += 0.4;
-  }
-  return Math.min(1, score / (1.5 * tokens.length + 2));
+  let matched = 0;
+  tokens.forEach((t, i) => {
+    const has = (field) => forms[i].some((w) => field.includes(w));
+    const inTitle = has(s.title);
+    const inTopics = has(s.topics);
+    const inChannel = has(s.channel);
+    if (inTitle) score += 1.5;
+    if (inTopics) score += 1;
+    if (inChannel) score += 1;
+    if (has(s.summary)) score += 0.4;
+    if (inTitle || inTopics || inChannel) matched++;
+  });
+  return { score: Math.min(1, score / (1.5 * tokens.length + 2)), full: matched === tokens.length };
 }
+
+// Re-uploads with different titles on different channels slip past load-time dedupe. In
+// results, a hit is skipped as a copy of one already shown when the content is nearly the same
+// (re-uploads measured 0.86-0.93), the titles share most of their words, and any numbered
+// words are identical ("Lecture 1A" and "Lecture 1B" are both kept).
+const COPY_SIMILARITY = 0.86;
+const COPY_TITLE_OVERLAP = 0.75;
+function titleWords(v) {
+  const words = new Set();
+  for (const w of v.search.title.trim().split(' ')) {
+    if (w.length < 2 && !/\d/.test(w)) continue; // keep "1" in "Part 1": it tells episodes apart
+    words.add(w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w);
+  }
+  return words;
+}
+const numbered = (words) => [...words].filter((w) => /\d/.test(w)).sort().join(' ');
+function isCopy(ds, h, k, words) {
+  if (!h.v.hasEmbedding || !k.v.hasEmbedding || numbered(words) !== k.numbered) return false;
+  let shared = 0;
+  for (const w of words) if (k.words.has(w)) shared++;
+  if (shared / Math.max(1, Math.min(words.size, k.words.size)) < COPY_TITLE_OVERLAP) return false;
+  return dotRows(ds.emb, ds.dim, h.v.i, k.v.i) >= COPY_SIMILARITY;
+}
+function collapseCopies(ds, hits, limit) {
+  const kept = [];
+  for (const h of hits) {
+    if (kept.length === limit) break;
+    const words = titleWords(h.v);
+    if (!kept.some((k) => isCopy(ds, h, k, words))) kept.push({ ...h, words, numbered: numbered(words) });
+  }
+  return kept;
+}
+
+// For a sort other than relevance, only clearly relevant hits are re-sorted (semantic search
+// scores every video, and the popular weak matches would otherwise jump to the top).
+const RELEVANT_GAP = 0.08;
+const RELEVANT_FLOOR = 0.62;
+const STRONG_TOPIC = 0.78;
 
 /**
  * @param {object} ds
  * @param {{ q: string, qvec: Float32Array|null, filters: object, limit?: number, nowMs?: number }} args
  */
 export function searchVideos(ds, { q, qvec, filters, limit = 60, nowMs = Date.now() }) {
+  if (qvec && qvec.length !== ds.dim) throw new Error(`query vector has ${qvec.length} dimensions, the data has ${ds.dim}`);
   const tokens = tokenize(q);
+  const forms = tokens.map(wordForms);
   const phrase = searchable(q);
 
   // Topics the query is about: by centroid similarity, or by the words in a topic's name.
@@ -70,37 +123,46 @@ export function searchVideos(ds, { q, qvec, filters, limit = 60, nowMs = Date.no
   const hits = [];
   let bestSim = -1;
   let bestKeyword = 0;
+  let anyFull = false;
   for (const v of ds.videos) {
     if (!v.visible || !matchesFilters(v, filters, nowMs)) continue;
-    const kw = keywordScore(v, tokens, phrase);
+    const { score: kw, full } = keywordScore(v, tokens, forms, phrase);
     const sim = qvec && v.hasEmbedding ? dotRowVec(ds.emb, ds.dim, v.i, qvec) : null;
     if (sim === null && kw === 0) continue;
     const topic = v.categories.find((c) => topics.has(c.id));
-    const rank = (sim ?? 0) + 0.12 * kw + 0.012 * Math.log1p(v.score) + (topic ? 0.015 : 0);
-    hits.push({ v, rank, sim, kw, topic });
+    const rank = (sim ?? 0) + 0.12 * kw + (full ? 0.03 : 0) + 0.012 * Math.log1p(v.score) + (topic ? 0.015 : 0);
+    hits.push({ v, rank, sim, kw, full, topic });
     if (sim !== null && sim > bestSim) bestSim = sim;
     if (kw > bestKeyword) bestKeyword = kw;
+    if (full) anyFull = true;
   }
 
   hits.sort((a, b) => b.rank - a.rank || b.v.score - a.v.score);
-  let top = hits.slice(0, limit);
+  let top;
   if (filters.sort && filters.sort !== 'relevance') {
-    // Re-sort the relevant hits by the chosen order rather than sorting the whole catalogue.
-    const byVid = new Map(top.map((h) => [h.v.vid, h]));
+    const relevant = hits.filter((h) =>
+      qvec ? h.full || (h.sim !== null && h.sim >= Math.max(RELEVANT_FLOOR, bestSim - RELEVANT_GAP)) : h.kw >= bestKeyword / 2,
+    );
+    const byVid = new Map(relevant.map((h) => [h.v.vid, h]));
     top = sortVideos(
-      top.map((h) => h.v),
+      relevant.map((h) => h.v),
       filters.sort,
-    ).map((v) => byVid.get(v.vid));
+    )
+      .slice(0, limit)
+      .map((v) => byVid.get(v.vid));
+  } else {
+    top = collapseCopies(ds, hits, limit);
   }
 
-  const weak = qvec ? bestSim < WEAK_SIMILARITY && bestKeyword < 0.5 : hits.length === 0;
+  // Weak: nothing close in meaning and no video carrying all the query's words.
+  const weak = qvec ? bestSim < WEAK_SIMILARITY && !anyFull : hits.length === 0;
   return {
     mode: qvec ? 'semantic' : 'keyword',
     weak,
     results: top.map((h) => ({
       vid: h.v.vid,
-      // Explain a hit that matched through its topic rather than its own words.
-      via: h.topic && h.kw < 0.2 ? h.topic.name : null,
+      // Explain a hit that matched through a clearly related topic rather than its own words.
+      via: h.topic && h.kw < 0.2 && (topics.get(h.topic.id) ?? 0) >= STRONG_TOPIC ? h.topic.name : null,
     })),
   };
 }

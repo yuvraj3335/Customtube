@@ -99,7 +99,8 @@ test('text helpers', () => {
   // non-Latin titles keep their letters, so their duplicates can be found too
   assert.equal(normalizeTitle('Я позвонил своему убийце!'), 'я позвонил своему убийце');
   assert.equal(normalizeTitle('Cafe\u0301 Talk'), 'café talk');
-  assert.equal(searchable('Café, Ünïcode & C++'), ' cafe unicode c ');
+  assert.equal(searchable('Café, Ünïcode & C++'), ' cafe unicode cplusplus ');
+  assert.equal(searchable('C# and F# on .NET'), ' csharp and fsharp on dotnet ');
   assert.equal(parseIsoDuration('PT1H2M3S'), 3723);
   assert.equal(parseIsoDuration('P1DT1S'), 86401);
   assert.equal(parseIsoDuration('PT45S'), 45);
@@ -108,4 +109,51 @@ test('text helpers', () => {
   assert.equal(parseIsoDuration('garbage'), null);
   assert.equal(monthIndex('2026-01') - monthIndex('2025-12'), 1);
   assert.equal(monthIndex('2026'), null);
+});
+
+test('hostile exports: BOMs, nulls, bad numbers, NaN vectors and unknown topics load safely', (t) => {
+  const fx = makeFixture({ withMeta: true });
+  t.after(() => rmSync(fx.dir, { recursive: true, force: true }));
+  const f = (name) => path.join(fx.dataDir, name);
+  const rows = readFileSync(f('videos.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  rows[1].score = 'lots'; // c0v1
+  rows[2].categories = [null, { id: 'no-such-topic', name: 'X' }, rows[2].categories[0]]; // c0v2
+  rows[3].hn.recommenders = -4; // c0v3
+  writeFileSync(f('videos.jsonl'), '﻿' + rows.map((r) => JSON.stringify(r)).join('\r\n') + '\r\n');
+  writeFileSync(f('taxonomy.json'), '﻿' + readFileSync(f('taxonomy.json'), 'utf8'));
+  const rel = readFileSync(f('related.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  rel[0].related.push(null);
+  writeFileSync(f('related.jsonl'), rel.map((r) => JSON.stringify(r)).join('\n'));
+  // a NaN in one embedding row
+  const npy = readFileSync(f('embeddings.npy'));
+  const ids = JSON.parse(readFileSync(f('embedding_ids.json'), 'utf8'));
+  const row = ids.indexOf(vidOf(3, 4));
+  npy.writeUInt16LE(0x7e00, npy.length - (ids.length - row) * 8 * 2);
+  writeFileSync(f('embeddings.npy'), npy);
+  // metadata: a live stream (P0D), an empty view count, and a cut-off last line
+  const meta = readFileSync(fx.metaFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  meta[1].item.contentDetails.duration = 'P0D';
+  meta[2].item.statistics.viewCount = '';
+  writeFileSync(fx.metaFile, meta.map((m) => JSON.stringify(m)).join('\n') + '\n{"vid":"c5v9_______","item":{"snip');
+
+  const ds = loadDataset({ dataDir: fx.dataDir, metaFile: fx.metaFile });
+  assert.equal(ds.byVid.get(vidOf(0, 1)).score, 0);
+  assert.equal(ds.byVid.get(vidOf(0, 3)).hn.recommenders, 0);
+  assert.deepEqual(ds.byVid.get(vidOf(0, 2)).categories.map((c) => c.id), ['functional-programming']);
+  assert.equal(ds.byVid.get(vidOf(3, 4)).hasEmbedding, false, 'the NaN row is not used');
+  for (const v of ds.videos) assert.ok(Number.isFinite(v.score));
+  for (let k = 0; k < ds.centroids.length; k++) assert.ok(Number.isFinite(ds.centroids[k]), 'centroids stay finite');
+  assert.equal(ds.byVid.get(vidOf(0, 1)).yt.duration_s, null, 'P0D is unknown, not a 0-second Short');
+  assert.equal(ds.byVid.get(vidOf(0, 2)).yt.views, null, 'an empty count is unknown');
+  assert.ok(ds.warnings.some((w) => /unreadable line/.test(w)));
+  assert.ok(ds.warnings.some((w) => /unusable row/.test(w)));
+  assert.ok(ds.warnings.some((w) => /invalid score\/count/.test(w)));
+  assert.ok(ds.warnings.some((w) => /not in taxonomy/.test(w)));
+});
+
+test('a broken JSON file names itself', (t) => {
+  const fx = makeFixture();
+  t.after(() => rmSync(fx.dir, { recursive: true, force: true }));
+  writeFileSync(path.join(fx.dataDir, 'taxonomy.json'), '');
+  assert.throws(() => loadDataset({ dataDir: fx.dataDir }), /taxonomy\.json:/);
 });

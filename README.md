@@ -24,7 +24,9 @@ filter and mix from there.
 - **Topics** has quick views of the whole collection: recently recommended, most recommended,
   lectures, documentaries, and (with YouTube metadata) hidden gems, over an hour, under 4 minutes.
 - **Search** matches by meaning (the `bge-small-en-v1.5` model the data's vectors were made with), plus
-  keywords and topics, with filters and sorting.
+  whole-word keywords (singular or plural, and names like C++, C# and .NET) and topics, with filters
+  and sorting. Sorting by anything but relevance re-orders only the clearly relevant hits, and
+  re-uploads of the same video are shown once.
 - **Every video page** shows what HN actually said about it, linking back to the comments, with "Up
   next" built from shared HN recommenders and similar topics.
 - No accounts and no tracking. Your likes, history, settings and added videos stay in your browser;

@@ -541,6 +541,11 @@ export function createApp({
       } catch (err) {
         log.error?.(`query embedding failed, using keyword search: ${err.message}`);
       }
+      if (qvec && qvec.length !== ds.dim) {
+        // A model that doesn't match the data's vectors would make every similarity garbage.
+        log.error?.(`query vectors have ${qvec.length} dimensions but the data has ${ds.dim}; using keyword search`);
+        qvec = null;
+      }
       const out = searchVideos(ds, { q, qvec, filters, nowMs: now() });
       sendJson(req, res, 200, {
         mode: out.mode,
@@ -626,7 +631,7 @@ export function readConfig(env = process.env) {
     metaFile: path.resolve(env.CUSTOMTUBE_YOUTUBE_META || path.join(ROOT, 'data/youtube_meta.jsonl')),
     host: env.HOST || '127.0.0.1',
     port,
-    embedder: env.CUSTOMTUBE_EMBEDDER !== 'off',
+    embedder: !/^(off|0|false|no)$/i.test(env.CUSTOMTUBE_EMBEDDER ?? ''),
     cacheDir: path.resolve(env.CUSTOMTUBE_MODEL_CACHE || path.join(ROOT, '.cache/models')),
     publicUrl: env.PUBLIC_URL || null,
     // TRUST_PROXY=N: N proxies of ours sit in front of the server (1 = a single reverse proxy).
@@ -643,6 +648,7 @@ async function main() {
     `loaded ${s.videos} videos (${s.duplicates} duplicates hidden), ${s.mentions} mentions, ${s.categories} topics in ${Date.now() - t0} ms; ` +
       `YouTube metadata: ${ds.hasMeta ? 'yes' : 'no'}`,
   );
+  for (const w of ds.warnings) console.warn(`data warning: ${w}`);
   const embedder = createEmbedder({ cacheDir: cfg.cacheDir, enabled: cfg.embedder });
   embedder.start();
   const { server } = createApp({ ds, embedder, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy });

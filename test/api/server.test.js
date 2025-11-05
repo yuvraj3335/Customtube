@@ -452,6 +452,24 @@ describe('round-3 hardening', () => {
     assert.match(search.body, /<title>x\$&#39; - search · Custom Tube<\/title>/);
   });
 
+  test('a query model whose vectors do not match the data falls back to keywords', async () => {
+    const fx2 = makeFixture();
+    const ds2 = loadDataset({ dataDir: fx2.dataDir });
+    const errors = [];
+    const wrong = { status: () => 'ready', embed: async () => new Float32Array(16).fill(0.25) };
+    const app2 = await start({ ds: ds2, embedder: wrong, log: { info() {}, error: (m) => errors.push(m) } });
+    try {
+      const r = await app2.get('/api/search?q=Databases%20talk%20number%203');
+      assert.equal(r.status, 200);
+      assert.equal(r.body.mode, 'keyword');
+      assert.equal(r.body.items[0].vid, vidOf(1, 3));
+      assert.match(errors.join(' '), /16 dimensions but the data has 8/);
+    } finally {
+      await app2.close();
+      rmSync(fx2.dir, { recursive: true, force: true });
+    }
+  });
+
   test('cheap API routes still have a per-client budget', async () => {
     for (let i = 0; i < 3; i++) assert.equal((await app.get('/api/stats')).status, 200);
     const r = await app.get('/api/stats');
