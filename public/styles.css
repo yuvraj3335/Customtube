@@ -222,7 +222,7 @@ main:focus { outline: none; }
   display: grid;
   place-items: center;
 }
-.play svg { width: 34px; height: 34px; fill: #fff; }
+.play svg { width: 34px; height: 34px; fill: var(--accent-ink); }
 .poster:hover .play { filter: brightness(1.1); }
 .watch-title { font-size: 21px; margin: 14px 0 8px; }
 .owner { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -283,22 +283,20 @@ kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6p
 /* ---------- overlays ---------- */
 #toast {
   position: fixed;
+  z-index: 40;
   left: 50%;
   bottom: 24px;
   transform: translate(-50%, 20px);
   background: var(--text);
   color: var(--bg);
-  padding: 9px 16px;
+  padding: 10px 16px;
   border-radius: 10px;
   opacity: 0;
-  pointer-events: none;
-  transition: 0.2s;
+  visibility: hidden; /* also out of the tab order while hidden */
+  transition: opacity 0.2s, transform 0.2s, visibility 0s linear 0.2s;
   max-width: calc(100vw - 32px);
 }
-#toast.on { opacity: 1; transform: translate(-50%, 0); }
-.help { position: fixed; inset: 0; background: rgb(0 0 0 / 45%); display: grid; place-items: center; z-index: 20; padding: 16px; }
-.help[hidden] { display: none; }
-.help-card { background: var(--surface); border-radius: var(--radius); padding: 20px 24px; box-shadow: var(--shadow); max-width: 440px; width: 100%; }
+#toast.on { opacity: 1; visibility: visible; transform: translate(-50%, 0); transition: opacity 0.2s, transform 0.2s; }
 .help-card h2 { margin-top: 0; font-size: 18px; }
 
 /* ---------- small screens ---------- */
@@ -380,9 +378,9 @@ kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6p
 .list-options .option { justify-content: flex-start; }
 .list-options .count { margin-left: auto; }
 .dialog-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
-#toast { display: flex; gap: 14px; align-items: center; pointer-events: none; }
-#toast.on { pointer-events: auto; }
-.toast-undo { border: 0; background: transparent; color: var(--accent); font-weight: 700; cursor: pointer; padding: 0; }
+#toast { display: flex; gap: 14px; align-items: center; }
+/* same colours as the toast text, so contrast matches it in both themes */
+.toast-undo { border: 0; background: transparent; color: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; padding: 6px 4px; margin: -6px -4px; }
 .foot { display: flex; flex-wrap: wrap; gap: 6px 22px; justify-content: center; padding: 28px 16px 40px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); }
 .foot a { color: inherit; }
 .quick { margin: 4px 0 26px; }
@@ -411,3 +409,21 @@ kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 6p
   .list-row { grid-template-columns: 20px minmax(0, 1fr); }
   .row-actions { grid-column: 2; }
 }
+
+/* ---------- native dialogs ---------- */
+.modal {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0;
+  width: min(440px, calc(100vw - 32px));
+  box-shadow: var(--shadow);
+}
+.modal::backdrop { background: rgb(0 0 0 / 55%); }
+.modal .dialog-card, .modal .help-card { padding: 20px 22px; box-shadow: none; max-width: none; }
+.help-card h2 { margin: 0 0 12px; font-size: 18px; }
+.pill:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pill:has(input:focus-visible), label.pill:focus-within { outline: 2px solid var(--focus); }
+.title-input { font: inherit; font-size: 22px; font-weight: 700; padding: 2px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); width: min(520px, 100%); }
+@media (hover: none) { .keys-hint { display: none; } }

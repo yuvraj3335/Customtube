@@ -346,7 +346,7 @@ function laterButton(vid) {
 
 function hnLine(item) {
   if (item.custom) return item.short ? 'Short · added by you' : 'Added by you';
-  return item.recommenders ?`Recommended by ${plural(item.recommenders, 'HN commenter')} · ${plural(item.rec_months, 'month')}` : 'Cited on HN, not recommended';
+  return item.recommenders ? `${plural(item.recommenders, 'HN recommender')} · ${plural(item.rec_months, 'month')}` : 'Cited on HN, not recommended';
 }
 
 function card(item) {
@@ -376,19 +376,20 @@ function card(item) {
 // ---------- card menu and "Save to list" dialog ----------
 
 let openMenu = null;
-function closeMenu() {
+function closeMenu({ restoreFocus = true } = {}) {
   if (!openMenu) return;
-  openMenu.el.remove();
-  openMenu.button?.setAttribute('aria-expanded', 'false');
-  openMenu.button?.focus({ preventScroll: true });
+  const { el, button } = openMenu;
   openMenu = null;
+  el.remove();
+  button?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && button?.isConnected) button.focus({ preventScroll: true });
 }
 
-function showMenu(button, items) {
-  closeMenu();
+function showMenu(button, items, label) {
+  closeMenu({ restoreFocus: false });
   const menu = h(
     'div',
-    { class: 'menu', role: 'menu' },
+    { class: 'menu', role: 'menu', 'aria-label': label },
     items.map(([label, run]) =>
       h('button', {
         type: 'button',
@@ -408,53 +409,93 @@ function showMenu(button, items) {
   menu.style.top = `${r.bottom + 4 + scrollY}px`;
   button.setAttribute('aria-expanded', 'true');
   openMenu = { el: menu, button };
+  // Tabbing out of the menu closes it, leaving focus where Tab put it.
+  menu.addEventListener('focusout', (e) => {
+    if (openMenu?.el === menu && !menu.contains(e.relatedTarget)) closeMenu({ restoreFocus: false });
+  });
   menu.querySelector('button')?.focus();
+}
+
+/** Pages listing your own saved things: hiding a video there would only confuse. */
+const onSavedPage = () => ['/liked', '/later', '/history', '/mine', '/library'].includes(location.pathname) || location.pathname.startsWith('/list/');
+
+/** Remove a card, remember where it was, and move focus to its neighbour. */
+function detachCards(cards) {
+  const spots = cards.map((el) => ({ el, parent: el.parentNode, next: el.nextSibling }));
+  const focusEl = cards.length ? (cards[cards.length - 1].nextElementSibling || cards[0].previousElementSibling) : null;
+  for (const c of cards) c.remove();
+  focusEl?.querySelector('.card-link')?.focus();
+  return () => {
+    for (const { el, parent, next } of spots.reverse()) if (parent?.isConnected) parent.insertBefore(el, next?.parentNode === parent ? next : null);
+  };
 }
 
 function cardMenu(button) {
   const el = button.closest('.card');
   const vid = el.dataset.vid;
   const channel = el.dataset.channel;
+  const title = el.querySelector('.card-title')?.textContent ?? 'this video';
   const later = state.later.includes(vid);
-  showMenu(button, [
+  const items = [
     [later ? 'Remove from Watch later' : 'Save to Watch later', () => toggleLater(vid)],
-    ['Save to list…', () => saveToListDialog(vid)],
-    [
+    ['Save to list…', () => saveToListDialog(vid, button)],
+  ];
+  if (!onSavedPage()) {
+    items.push([
       'Not interested',
       () => {
-        if (!state.dislikes.includes(vid)) setVote(vid, 'dislike');
-        el.remove();
+        // Remember exactly what was there, so Undo restores it rather than toggling.
+        const before = { liked: state.likes.includes(vid), disliked: state.dislikes.includes(vid) };
+        if (!before.disliked) setVote(vid, 'dislike');
+        const reattach = detachCards([el]);
         toast('Hidden. Similar videos show up less.', () => {
-          setVote(vid, 'dislike');
-          route();
+          state.dislikes = state.dislikes.filter((v) => v !== vid);
+          if (before.disliked) state.dislikes.push(vid);
+          if (before.liked && !state.likes.includes(vid)) state.likes.push(vid);
+          saveLists();
+          reattach();
         });
       },
-    ],
-    ...(channel
-      ? [
-          [
-            `Hide ${channel}`,
-            () => {
-              if (!state.prefs.muteChannels.includes(channel)) toggleChannel(channel);
-              for (const c of view.querySelectorAll('.card')) if (c.dataset.channel === channel) c.remove();
-              toast(`${channel} won't appear in your feed`, () => {
-                toggleChannel(channel);
-                route();
-              });
-            },
-          ],
-        ]
-      : []),
-  ]);
+    ]);
+    if (channel) {
+      items.push([
+        `Hide ${channel}`,
+        () => {
+          const wasMuted = state.prefs.muteChannels.includes(channel);
+          if (!wasMuted) toggleChannel(channel);
+          const reattach = detachCards([...view.querySelectorAll('.card')].filter((c) => c.dataset.channel === channel));
+          toast(`${channel} won't appear in your feed`, () => {
+            if (!wasMuted && state.prefs.muteChannels.includes(channel)) toggleChannel(channel);
+            reattach();
+          });
+        },
+      ]);
+    }
+  }
+  showMenu(button, items, `Actions for ${title}`);
 }
 
+// Native <dialog> + showModal(): focus stays inside, Escape closes it, the page behind is inert.
+const dialogOpeners = new WeakMap();
+function openModal(d, opener) {
+  dialogOpeners.set(d, opener ?? document.activeElement);
+  if (!d.open) d.showModal();
+}
+for (const d of [$('#dialog'), $('#help')]) {
+  d.addEventListener('close', () => {
+    d.replaceChildren();
+    const opener = dialogOpeners.get(d);
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  });
+  // a click on the backdrop (the dialog element itself, outside its card) closes it
+  d.addEventListener('click', (e) => e.target === d && d.close());
+}
 function closeDialog() {
-  const d = $('#dialog');
-  d.hidden = true;
-  d.replaceChildren();
+  for (const d of [$('#dialog'), $('#help')]) if (d.open) d.close();
 }
+const anyDialogOpen = () => $('#dialog').open || $('#help').open;
 
-function saveToListDialog(vid) {
+function saveToListDialog(vid, opener) {
   const d = $('#dialog');
   const render = () => {
     const name = h('input', { type: 'text', id: 'new-list-name', placeholder: 'New list name', maxlength: 80, 'aria-label': 'New list name' });
@@ -467,11 +508,12 @@ function saveToListDialog(vid) {
       saveLists2();
       toast(`Saved to ${list.name}`);
       render();
+      d.querySelector(`input[data-list="${list.id}"]`)?.focus();
     });
     d.replaceChildren(
       h(
         'div',
-        { class: 'dialog-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dialog-title' },
+        { class: 'dialog-card' },
         h('h2', { id: 'dialog-title' }, 'Save to…'),
         state.lists.length
           ? h(
@@ -495,7 +537,7 @@ function saveToListDialog(vid) {
     );
   };
   render();
-  d.hidden = false;
+  openModal(d, opener);
   (d.querySelector('input[type="checkbox"]') || d.querySelector('#new-list-name'))?.focus();
 }
 
@@ -523,43 +565,78 @@ let routeToken = 0;
 const cleanups = [];
 const current = (token) => token === routeToken;
 
-/** A grid that loads pages from `load(offset)` as you scroll. */
+/** A plain-language message for a failed request. */
+function failure(err) {
+  if (err instanceof TypeError) return 'You seem to be offline, or the server can’t be reached.';
+  if (err.status === 429) return 'Lots of requests right now. Give it a moment.';
+  return err.message;
+}
+
+/**
+ * A grid that loads pages from `load(offset)` as you scroll. A failed page shows a Retry
+ * button instead of ending the list. Returns a controller whose resume() re-attaches the
+ * grid after the page is restored from the back/forward cache.
+ */
 function infiniteGrid(container, load, { empty, token }) {
+  const ctx = { token };
   const grid = h('div', { class: 'grid' });
-  const status = h('p', { class: 'status' }, 'Loading…');
+  const status = h('p', { class: 'status', role: 'status' }, 'Loading…');
   const sentinel = h('div', { class: 'sentinel', 'aria-hidden': 'true' });
-  container.append(grid, status, sentinel);
+  container.append(h('h2', { class: 'visually-hidden' }, 'Videos'), grid, status, sentinel);
   let offset = 0;
   let rendered = 0;
   let busy = false;
   let done = false;
+  let failed = false;
   const observer = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && more(), { rootMargin: '800px' });
-  cleanups.push(() => observer.disconnect());
   async function more() {
-    if (busy || done || !current(token)) return;
+    if (busy || done || failed || !current(ctx.token)) return;
     busy = true;
     try {
       const page = await load(offset);
-      if (!current(token)) return;
+      if (!current(ctx.token)) return;
       for (const item of page.items) grid.append(card(item));
       rendered += page.items.length;
       // `consumed` lets a loader add its own items (My videos) without shifting server offsets.
       offset += page.consumed ?? page.items.length;
       done = page.next_offset === null || page.next_offset === undefined || page.items.length === 0;
-      status.textContent = done ? (rendered ? '' : empty) : 'Loading…';
+      status.replaceChildren(done ? (rendered ? '' : empty) : 'Loading…');
       status.hidden = done && rendered > 0;
     } catch (err) {
-      if (!current(token)) return;
-      done = true;
-      status.textContent = `Couldn't load videos (${err.message}).`;
+      if (!current(ctx.token)) return;
+      failed = true;
+      status.hidden = false;
+      status.replaceChildren(
+        `Couldn’t load ${rendered ? 'more ' : ''}videos. ${failure(err)} `,
+        h('button', {
+          type: 'button',
+          class: 'pill',
+          onclick: () => {
+            failed = false;
+            status.replaceChildren('Loading…');
+            more();
+          },
+        }, 'Retry'),
+      );
     } finally {
       busy = false;
     }
     if (done) observer.disconnect();
-    else if (sentinel.getBoundingClientRect().top < innerHeight + 800) more();
+    else if (!failed && sentinel.getBoundingClientRect().top < innerHeight + 800) more();
   }
-  observer.observe(sentinel);
-  return more();
+  const attach = () => {
+    observer.observe(sentinel);
+    cleanups.push(() => observer.disconnect());
+  };
+  attach();
+  const first = more();
+  return {
+    first,
+    resume(newToken) {
+      ctx.token = newToken;
+      if (!done) attach();
+    },
+  };
 }
 
 // ---------- filters ----------
@@ -623,7 +700,19 @@ function filterBar({ search = false } = {}) {
 
 // ---------- pages ----------
 
-async function home(token) {
+// Home is kept when you leave it, so Back returns to the same cards at the same scroll position
+// (as long as your likes, dislikes and settings haven't changed in the meantime).
+let homeCache = null;
+const homeKey = () => JSON.stringify([state.likes, state.dislikes, state.prefs, state.custom.map((c) => c.vid), SEED]);
+
+async function home(token, { restore = false } = {}) {
+  if (restore && homeCache?.key === homeKey()) {
+    view.replaceChildren(homeCache.section);
+    document.title = `${SITE}: videos Hacker News recommends`;
+    homeCache.grid.resume(token);
+    return;
+  }
+  homeCache = null;
   const warm = state.likes.length > 0;
   const section = h(
     'section',
@@ -631,7 +720,7 @@ async function home(token) {
     pageHead(
       warm ? 'Your feed' : 'Start here',
       warm
-        ? `Tuned by ${plural(state.likes.length, 'like')}${state.dislikes.length ? ` and ${plural(state.dislikes.length, 'dislike')}` : ''}. Hover a video to see why it's here.`
+        ? `Tuned by ${plural(state.likes.length, 'like')}${state.dislikes.length ? ` and ${plural(state.dislikes.length, 'dislike')}` : ''}. Each card says why it’s here.`
         : 'HN classics, recent favourites and topics to explore. Like a few videos to tune this feed.',
       playAllLink(vidsOnPage),
     ),
@@ -653,7 +742,8 @@ async function home(token) {
   // My videos go in every `every`-th slot: weight 5 → every 2nd card, weight 1 → every 10th.
   const every = state.prefs.mix.mine > 0 ? Math.max(2, 12 - 2 * state.prefs.mix.mine) : Infinity;
   let shown = 0;
-  await infiniteGrid(
+  const key = homeKey();
+  const grid = infiniteGrid(
     section,
     async (offset) => {
       let page;
@@ -679,6 +769,8 @@ async function home(token) {
       token,
     },
   );
+  homeCache = { key, section, grid };
+  await grid.first;
 }
 
 /** The viewer's own videos for Home: not yet opened, allowed by the format settings, newest first. */
@@ -697,7 +789,7 @@ function myFeedPicks() {
 async function listPage(token, { title, sub, params, crumb }) {
   const section = h('section', {}, crumb || null, pageHead(title, sub, playAllLink(vidsOnPage)), filterBar());
   view.replaceChildren(section);
-  await infiniteGrid(section, (offset) => api(`/api/list${qs({ ...params, ...currentFilters(), offset, n: 24 })}`), { empty: 'No videos match these filters.', token });
+  await infiniteGrid(section, (offset) => api(`/api/list${qs({ ...params, ...currentFilters(), offset, n: 24 })}`), { empty: 'No videos match these filters.', token }).first;
 }
 
 let browseCache = null;
@@ -757,7 +849,7 @@ async function areaPage(token, id) {
     filterBar(),
   );
   view.replaceChildren(section);
-  await infiniteGrid(section, (offset) => api(`/api/list${qs({ area: id, ...currentFilters(), offset, n: 24 })}`), { empty: 'No videos match these filters.', token });
+  await infiniteGrid(section, (offset) => api(`/api/list${qs({ area: id, ...currentFilters(), offset, n: 24 })}`), { empty: 'No videos match these filters.', token }).first;
 }
 
 // Ready-made views of the whole collection; the last three need YouTube metadata.
@@ -841,7 +933,10 @@ async function watchPage(token, vid) {
   // The player starts as a frame from the video and only loads YouTube when you press play.
   const player = h('div', { class: 'player' });
   const poster = h('button', { type: 'button', class: 'poster', id: 'poster', 'aria-label': `Play ${d.title}` }, thumbImg(d.vid, { eager: true }), h('span', { class: 'play' }, icon('play')));
-  poster.addEventListener('click', () => player.replaceChildren(playerFrame(d.vid, d.title)));
+  poster.addEventListener('click', () => {
+    player.replaceChildren(playerFrame(d.vid, d.title));
+    player.querySelector('iframe').focus();
+  });
   player.append(poster);
 
   const voteBtn = (kind) => {
@@ -948,7 +1043,10 @@ function customWatchPage(c) {
   markSeen(c.vid);
   const player = h('div', { class: `player${c.short ? ' short' : ''}` });
   const poster = h('button', { type: 'button', class: 'poster', id: 'poster', 'aria-label': `Play ${c.title}` }, thumbImg(c.vid, { eager: true }), h('span', { class: 'play' }, icon('play')));
-  poster.addEventListener('click', () => player.replaceChildren(playerFrame(c.vid, c.title)));
+  poster.addEventListener('click', () => {
+    player.replaceChildren(playerFrame(c.vid, c.title));
+    player.querySelector('iframe').focus();
+  });
   player.append(poster);
   const remove = h('button', {
     type: 'button',
@@ -1063,10 +1161,15 @@ async function historyPage(token) {
         class: 'pill',
         id: 'clear-history',
         onclick: () => {
+          const before = state.seen;
           state.seen = [];
           saveLists();
-          toast('History cleared');
-          route();
+          route({ keepScroll: true, focus: '#view' });
+          toast('History cleared', () => {
+            state.seen = before;
+            saveLists();
+            if (location.pathname === '/history') route({ keepScroll: true });
+          });
         },
       }, 'Clear history')
     : null;
@@ -1222,12 +1325,14 @@ async function settingsPage(token) {
     { class: 'group' },
     h('legend', {}, 'Feed mix'),
     h('p', { class: 'hint' }, 'How often each source gets a turn. 0 turns it off.'),
-    Object.entries(SOURCE_LABELS).map(([key, [label, hint]]) => {
-      const out = h('output', { class: 'weight' }, String(p.mix[key]));
-      const range = h('input', { type: 'range', min: 0, max: 5, step: 1, value: p.mix[key], id: `mix-${key}`, 'aria-label': `${label} weight` });
+    Object.entries(SOURCE_LABELS).filter(([key]) => key !== 'gems' || config.has_youtube_metadata).map(([key, [label, hint]]) => {
+      const text = (w) => (Number(w) === 0 ? 'off' : `${w} of 5`);
+      const out = h('output', { class: 'weight', for: `mix-${key}`, 'aria-hidden': 'true' }, String(p.mix[key]));
+      const range = h('input', { type: 'range', min: 0, max: 5, step: 1, value: p.mix[key], id: `mix-${key}`, 'aria-label': `${label} weight`, 'aria-valuetext': text(p.mix[key]) });
       range.addEventListener('input', () => {
         p.mix[key] = Number(range.value);
         out.textContent = range.value;
+        range.setAttribute('aria-valuetext', text(range.value));
       });
       range.addEventListener('change', () => changed());
       return h('div', { class: 'mixrow' }, h('div', {}, h('b', {}, label), h('span', { class: 'hint' }, hint)), range, out);
@@ -1237,7 +1342,25 @@ async function settingsPage(token) {
   // Topics and channels
   const chipList = (items, label, onRemove, emptyText) =>
     items.length
-      ? h('div', { class: 'chips' }, items.map((it) => h('button', { type: 'button', class: 'chip removable', title: `Remove ${label(it)}`, onclick: (e) => { onRemove(it); e.currentTarget.remove(); } }, label(it), h('span', { 'aria-hidden': 'true' }, '×'))))
+      ? h(
+          'div',
+          { class: 'chips' },
+          items.map((it) =>
+            h('button', {
+              type: 'button',
+              class: 'chip removable',
+              'aria-label': `Remove ${label(it)}`,
+              title: `Remove ${label(it)}`,
+              onclick: (e) => {
+                const chip = e.currentTarget;
+                const next = chip.nextElementSibling || chip.previousElementSibling || chip.closest('fieldset')?.querySelector('select');
+                onRemove(it);
+                chip.remove();
+                next?.focus();
+              },
+            }, label(it), h('span', { 'aria-hidden': 'true' }, '×')),
+          ),
+        )
       : h('p', { class: 'hint' }, emptyText);
   const topicSelect = (kind) => {
     const sel = h('select', { 'aria-label': kind === 'follow' ? 'Follow a topic' : 'Mute a topic', id: `${kind}-topic-select` }, h('option', { value: '' }, kind === 'follow' ? 'Follow a topic…' : 'Mute a topic…'), areas.map((a) => h('optgroup', { label: a.name }, a.categories.map((c) => h('option', { value: c.id }, c.name)))));
@@ -1245,7 +1368,7 @@ async function settingsPage(token) {
       if (!sel.value) return;
       const list = kind === 'follow' ? p.followTopics : p.muteTopics;
       if (!list.includes(sel.value)) toggleTopic(sel.value, kind);
-      route();
+      route({ keepScroll: true, focus: `#${kind}-topic-select` });
     });
     return sel;
   };
@@ -1278,9 +1401,14 @@ async function settingsPage(token) {
     const file = importInput.files?.[0];
     if (!file) return;
     try {
+      const before = snapshotProfile();
       importProfile(JSON.parse(await file.text()));
-      toast('Settings imported');
-      route();
+      importInput.value = '';
+      route({ keepScroll: true, focus: '#export-profile' });
+      toast('Settings imported', () => {
+        importProfile(before);
+        route({ keepScroll: true });
+      });
     } catch (err) {
       toast(`Couldn't import that file (${err.message})`);
     }
@@ -1301,10 +1429,15 @@ async function settingsPage(token) {
         class: 'pill',
         id: 'reset-prefs',
         onclick: () => {
+          const before = state.prefs;
           state.prefs = sanitizePrefs(null);
           savePrefs();
-          toast('Feed settings reset');
-          route();
+          route({ keepScroll: true, focus: '#reset-prefs' });
+          toast('Feed settings reset', () => {
+            state.prefs = before;
+            savePrefs();
+            route({ keepScroll: true });
+          });
         },
       }, 'Reset feed settings'),
     ),
@@ -1327,8 +1460,11 @@ async function settingsPage(token) {
 }
 
 const PROFILE_VERSION = 2; // 2 added lists
+function snapshotProfile() {
+  return structuredClone({ app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom, lists: state.lists });
+}
 function exportProfile() {
-  const data = { app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom, lists: state.lists };
+  const data = snapshotProfile();
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   const a = h('a', { href: url, download: `customtube-${new Date().toISOString().slice(0, 10)}.json` });
   document.body.append(a);
@@ -1359,8 +1495,10 @@ async function minePage() {
   const input = h('input', { type: 'text', id: 'add-url', placeholder: 'Paste a YouTube video or Shorts link', 'aria-label': 'YouTube link', autocomplete: 'off', maxlength: 500 });
   const status = h('p', { class: 'hint', id: 'add-status', role: 'status' });
   const form = h('form', { class: 'addform', id: 'add-video' }, input, h('button', { type: 'submit', class: 'pill on' }, 'Add'));
+  const addButton = form.querySelector('button');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (addButton.disabled) return;
     const parsed = parseYoutubeInput(input.value);
     if (!parsed) {
       status.textContent = 'That doesn’t look like a YouTube link.';
@@ -1371,8 +1509,14 @@ async function minePage() {
       return;
     }
     status.textContent = 'Looking it up on YouTube…';
+    addButton.disabled = true;
     try {
       const info = await api(`/api/oembed${qs({ vid: parsed.vid })}`);
+      // a second submit (or another tab) may have added it while we waited
+      if (state.custom.some((c) => c.vid === parsed.vid)) {
+        status.textContent = 'Already in My videos.';
+        return;
+      }
       if (info.in_collection) {
         status.textContent = '';
         toast('That one is already in the HN collection. Opening it.');
@@ -1382,9 +1526,11 @@ async function minePage() {
       state.custom.push({ vid: parsed.vid, title: info.title, channel: info.channel, short: parsed.short, added: new Date().toISOString() });
       saveCustom();
       toast(`Added “${info.title}”`);
-      minePage();
+      route({ keepScroll: true, focus: '#add-url' });
     } catch (err) {
-      status.textContent = err.status === 429 ? 'Too many lookups. Try again in a minute.' : err.message;
+      status.textContent = err.status === 429 ? 'Too many lookups. Try again in a minute.' : failure(err);
+    } finally {
+      addButton.disabled = false;
     }
   });
   const items = state.custom.slice().reverse().map((c) => ({ vid: c.vid, title: c.title, channel: c.channel, custom: true, short: c.short }));
@@ -1483,11 +1629,26 @@ async function listPageOne(token, id) {
     class: 'pill',
     id: 'rename-list',
     onclick: () => {
-      const name = prompt('Rename list', list.name);
-      if (name === null || !name.trim()) return;
-      list.name = name.trim().slice(0, 80);
-      save();
-      route();
+      // Edit the name in place: Enter saves, Escape cancels.
+      const heading = view.querySelector('.pagehead h1');
+      const input = h('input', { type: 'text', id: 'list-name', value: list.name, maxlength: 80, 'aria-label': 'List name', class: 'title-input' });
+      const finish = (saveIt) => {
+        if (saveIt && input.value.trim()) {
+          list.name = input.value.trim().slice(0, 80);
+          save();
+        }
+        route({ keepScroll: true, focus: '#rename-list' });
+      };
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') finish(true);
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          finish(false);
+        }
+      });
+      input.addEventListener('blur', () => finish(true), { once: true });
+      heading.replaceWith(input);
+      input.select();
     },
   }, 'Rename');
   const del = h('button', {
@@ -1512,7 +1673,11 @@ async function listPageOne(token, id) {
     if (i < 0 || j < 0 || j >= list.vids.length) return;
     [list.vids[i], list.vids[j]] = [list.vids[j], list.vids[i]];
     save();
-    route();
+    // Keep focus on the same control of the moved video (or its other arrow at the ends).
+    const k = j + 1;
+    const first = delta < 0 ? 'up' : 'down';
+    const atEnd = (delta < 0 && j === 0) || (delta > 0 && j === list.vids.length - 1);
+    route({ keepScroll: true, focus: `.list-row:nth-child(${k}) [data-act="${atEnd ? (first === 'up' ? 'down' : 'up') : first}"]` });
   };
   const rows = items.map((item, i) =>
     h(
@@ -1523,16 +1688,24 @@ async function listPageOne(token, id) {
       h(
         'div',
         { class: 'row-actions' },
-        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': `Move ${item.title} up`, disabled: i === 0, onclick: () => move(item.vid, -1) }, '↑'),
-        h('button', { type: 'button', class: 'icon-btn small', 'aria-label': `Move ${item.title} down`, disabled: i === items.length - 1, onclick: () => move(item.vid, 1) }, '↓'),
+        h('button', { type: 'button', class: 'icon-btn small', dataset: { act: 'up' }, 'aria-label': `Move ${item.title} up`, disabled: i === 0, onclick: () => move(item.vid, -1) }, '↑'),
+        h('button', { type: 'button', class: 'icon-btn small', dataset: { act: 'down' }, 'aria-label': `Move ${item.title} down`, disabled: i === items.length - 1, onclick: () => move(item.vid, 1) }, '↓'),
         h('button', {
           type: 'button',
           class: 'icon-btn small',
+          dataset: { act: 'remove' },
           'aria-label': `Remove ${item.title} from this list`,
           onclick: () => {
+            const at = list.vids.indexOf(item.vid);
             list.vids = list.vids.filter((v) => v !== item.vid);
             save();
-            route();
+            const n = Math.min(at, list.vids.length - 1) + 1;
+            route({ keepScroll: true, focus: n > 0 ? `.list-row:nth-child(${n}) [data-act="remove"]` : '#rename-list' });
+            toast(`Removed from ${list.name}`, () => {
+              if (!list.vids.includes(item.vid)) list.vids.splice(at, 0, item.vid);
+              save();
+              if (location.pathname === `/list/${list.id}`) route({ keepScroll: true });
+            });
           },
         }, '✕'),
       ),
@@ -1556,6 +1729,10 @@ function notFound(message = 'Page not found.') {
 
 // ---------- router ----------
 
+// The router restores scroll itself: on Back/Forward to where you were, otherwise to the top.
+history.scrollRestoration = 'manual';
+const rememberScroll = () => history.replaceState({ ...(history.state || {}), scrollY }, '', location.pathname + location.search);
+
 function navigate(href, { replace = false } = {}) {
   const url = new URL(href, location.origin);
   if (url.origin !== location.origin) {
@@ -1563,12 +1740,19 @@ function navigate(href, { replace = false } = {}) {
     return;
   }
   const target = url.pathname + url.search;
+  rememberScroll();
   if (replace) history.replaceState(null, '', target);
   else if (target !== location.pathname + location.search) history.pushState(null, '', target);
   route();
 }
 
-async function route() {
+/**
+ * Render the page for the current URL.
+ * restore: Back/Forward (reuse a cached Home, put the scroll back).
+ * keepScroll + focus: re-render in place after an edit, then focus `focus` (a selector).
+ */
+async function route({ restore = false, keepScroll = false, focus = null } = {}) {
+  const y = restore ? (history.state?.scrollY ?? 0) : keepScroll ? scrollY : 0;
   const token = ++routeToken;
   while (cleanups.length) cleanups.pop()();
   selected = -1;
@@ -1583,15 +1767,24 @@ async function route() {
     else a.removeAttribute('aria-current');
   }
   if (!pathname.startsWith('/search/')) $('#q').value = '';
-  view.replaceChildren(h('p', { class: 'status' }, 'Loading…'));
-  window.scrollTo(0, 0);
+  if (!keepScroll) view.replaceChildren(h('p', { class: 'status' }, 'Loading…'));
+  if (!restore && !keepScroll) window.scrollTo(0, 0);
   let m;
   try {
-    if (pathname === '/') await home(token);
+    if (pathname === '/') await home(token, { restore });
     else if ((m = /^\/watch\/([A-Za-z0-9_-]{11})$/.exec(pathname))) await watchPage(token, m[1]);
     else if ((m = /^\/c\/([a-z0-9-]+)$/.exec(pathname))) await categoryPage(token, m[1]);
     else if ((m = /^\/a\/([a-z0-9-]+)$/.exec(pathname))) await areaPage(token, m[1]);
-    else if ((m = /^\/search\/(.+)$/.exec(pathname))) await searchPage(token, decodeURIComponent(m[1]));
+    else if ((m = /^\/search\/(.+)$/.exec(pathname))) {
+      let q = null;
+      try {
+        q = decodeURIComponent(m[1]);
+      } catch {
+        // a hand-typed URL like /search/100%
+      }
+      if (q === null) notFound('That search link is malformed.');
+      else await searchPage(token, q);
+    }
     else if (pathname === '/topics') await topicsPage(token);
     else if (pathname === '/browse') await listPage(token, { title: browseTitle(), sub: 'From the whole collection. Change the filters below to narrow it.', params: {}, crumb: h('a', { class: 'crumb', href: '/topics' }, 'Topics') });
     else if (pathname === '/library') await libraryPage(token);
@@ -1605,11 +1798,18 @@ async function route() {
     else if (pathname === '/mine') await minePage(token);
     else notFound();
   } catch (err) {
-    if (current(token)) view.replaceChildren(h('p', { class: 'status' }, `Something went wrong (${err.message}).`));
+    if (current(token)) view.replaceChildren(h('p', { class: 'status' }, `Something went wrong. ${failure(err)}`));
   }
+  if (!current(token)) return;
+  if (restore || keepScroll) window.scrollTo(0, y);
+  // Move focus into the new page (or to what the edit asked for) so keyboard and screen-reader
+  // users start there instead of at the top of the document.
+  const target = focus ? $(focus) : null;
+  if (target) target.focus({ preventScroll: true });
+  else if (!restore && !keepScroll && document.activeElement !== $('#q')) view.focus({ preventScroll: true });
 }
 
-addEventListener('popstate', route);
+addEventListener('popstate', () => route({ restore: true }));
 
 document.addEventListener('click', (e) => {
   if (!(e.target instanceof Element)) return;
@@ -1618,10 +1818,6 @@ document.addEventListener('click', (e) => {
   if (more) {
     e.preventDefault();
     cardMenu(more);
-    return;
-  }
-  if (e.target.id === 'dialog') {
-    closeDialog();
     return;
   }
   const later = e.target.closest('[data-later]');
@@ -1642,7 +1838,7 @@ function toggleLater(vid) {
   for (const b of document.querySelectorAll(`.later-btn[data-later="${vid}"]`)) b.replaceWith(laterButton(vid));
   const pill = $('#save-later');
   if (pill && pill.dataset.later === vid) renderLaterPill(pill, vid);
-  if (!on && location.pathname === '/later') route();
+  if (!on && location.pathname === '/later') route({ keepScroll: true, focus: '.card .card-link' });
   toast(on ? 'Saved to Watch later' : 'Removed from Watch later');
 }
 
@@ -1657,11 +1853,14 @@ $('#search').addEventListener('submit', (e) => {
 
 const savedTheme = store.get('theme', null);
 if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
+const isDark = () => (document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches);
+const syncThemeButton = () => $('#theme').setAttribute('aria-pressed', String(isDark()));
+syncThemeButton();
 $('#theme').addEventListener('click', () => {
-  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-  const next = dark ? 'light' : 'dark';
+  const next = isDark() ? 'light' : 'dark';
   document.documentElement.dataset.theme = next;
   store.set('theme', next);
+  syncThemeButton();
 });
 
 let toastTimer;
@@ -1692,15 +1891,29 @@ function select(i) {
   if (!items.length) return;
   selected = Math.max(0, Math.min(i, items.length - 1));
   items.forEach((el, j) => el.classList.toggle('kbd', j === selected));
+  // Real focus, so Enter opens it and screen readers announce it.
+  items[selected].querySelector('.card-link')?.focus({ preventScroll: true });
   items[selected].scrollIntoView({ block: 'nearest' });
 }
 function toggleHelp(force) {
   const help = $('#help');
-  const show = force ?? help.hidden;
-  if (show) help.replaceChildren(h('div', { class: 'help-card', role: 'dialog', 'aria-label': 'Keyboard shortcuts' }, h('h2', {}, 'Keyboard shortcuts'), shortcutTable()));
-  help.hidden = !show;
+  const show = force ?? !help.open;
+  if (!show) {
+    if (help.open) help.close();
+    return;
+  }
+  help.replaceChildren(
+    h(
+      'div',
+      { class: 'help-card' },
+      h('h2', { id: 'help-title' }, 'Keyboard shortcuts'),
+      shortcutTable(),
+      h('div', { class: 'dialog-actions' }, h('button', { type: 'button', class: 'pill', onclick: () => help.close() }, 'Close')),
+    ),
+  );
+  openModal(help);
+  help.querySelector('button')?.focus();
 }
-$('#help').addEventListener('click', (e) => e.target.id === 'help' && toggleHelp(false));
 
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1708,19 +1921,19 @@ document.addEventListener('keydown', (e) => {
   const typing = el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
   if (e.key === 'Escape') {
     if (typing) el.blur();
-    toggleHelp(false);
     closeMenu();
-    closeDialog();
-    return;
+    return; // dialogs close themselves on Escape
   }
-  if (openMenu && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+  if (openMenu && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
     e.preventDefault();
     const items = [...openMenu.el.querySelectorAll('.menu-item')];
     const i = items.indexOf(document.activeElement);
-    items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
     return;
   }
-  if (typing) return;
+  // Shortcuts never fire while typing, or while a dialog or menu is open.
+  if (typing || anyDialogOpen() || openMenu) return;
   const sel = listItems()[selected];
   const watching = /^\/watch\/([A-Za-z0-9_-]{11})$/.exec(location.pathname)?.[1] ?? null;
   const target = sel?.dataset.vid || watching;
@@ -1735,12 +1948,6 @@ document.addEventListener('keydown', (e) => {
       break;
     case 'k':
       select(selected - 1);
-      break;
-    case 'Enter':
-      if (sel) {
-        e.preventDefault();
-        navigate(`/watch/${sel.dataset.vid}`);
-      }
       break;
     case 'l':
       if (target) {
@@ -1760,6 +1967,24 @@ document.addEventListener('keydown', (e) => {
       break;
     default:
       return;
+  }
+});
+
+// ---------- other tabs ----------
+
+// Another tab changed something: reload that part of the profile so this tab doesn't write
+// back a stale copy over it.
+addEventListener('storage', (e) => {
+  if (!e.key?.startsWith('customtube:')) return;
+  const key = e.key.slice('customtube:'.length);
+  if (key === 'likes' || key === 'dislikes' || key === 'seen' || key === 'later') state[key] = cleanIds(store.get(key, []));
+  else if (key === 'prefs') state.prefs = sanitizePrefs(store.get('prefs', null));
+  else if (key === 'custom') state.custom = sanitizeCustom(store.get('custom', []));
+  else if (key === 'lists') state.lists = sanitizeLists(store.get('lists', []));
+  else if (key === 'frames') state.frames = store.get('frames', true) !== false;
+  else return;
+  if (['/library', '/liked', '/later', '/history', '/mine', '/lists', '/settings'].includes(location.pathname) || location.pathname.startsWith('/list/')) {
+    route({ keepScroll: true });
   }
 });
 

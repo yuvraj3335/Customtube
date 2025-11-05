@@ -61,7 +61,10 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
       return route.fulfill({ status: 204, body: '' }); // YouTube embeds and anything else
     });
     page = await context.newPage();
-    page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+    page.on('console', (m) => {
+      // the malformed-link test expects its 404
+      if (m.type() === 'error' && !m.location().url.includes('/search/100%25%')) errors.push(`${m.text()} @ ${m.location().url}`);
+    });
     page.on('pageerror', (e) => errors.push(e.message));
   });
 
@@ -368,6 +371,148 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.waitForSelector('text=Videos you open show up here.');
   });
 
+  test('Back returns to the same Home cards at the same scroll position', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    await page.mouse.wheel(0, 2500);
+    await page.waitForFunction(() => document.querySelectorAll('.card').length > 24);
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(300);
+    const n = await page.locator('.card').count();
+    const target = page.locator('.card').nth(n - 3);
+    await target.scrollIntoViewIfNeeded(); // where the click will happen
+    await page.waitForLoadState('networkidle');
+    const before = await page.evaluate(() => ({ y: Math.round(scrollY), n: document.querySelectorAll('.card').length, first: document.querySelector('.card').dataset.vid }));
+    await target.locator('.card-link').click();
+    await page.waitForSelector('.comment');
+    await page.goBack();
+    await page.waitForSelector('.card');
+    const after = await page.evaluate(() => ({ y: Math.round(scrollY), n: document.querySelectorAll('.card').length, first: document.querySelector('.card').dataset.vid }));
+    assert.equal(after.first, before.first);
+    assert.ok(after.n >= before.n, `${after.n} cards after vs ${before.n} before`);
+    assert.ok(Math.abs(after.y - before.y) < 5, `scroll ${after.y} vs ${before.y}`);
+  });
+
+  test('keyboard: j focuses a card; Enter elsewhere does not open it; focus moves into each new page', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    await page.locator('body').click({ position: { x: 5, y: 300 } });
+    await page.keyboard.press('j');
+    assert.equal(await page.evaluate(() => document.activeElement.className), 'card-link');
+    await page.focus('nav.tabs a[href="/topics"]');
+    await page.keyboard.press('Enter');
+    await page.waitForURL('**/topics');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'view', 'focus moved to the new page');
+  });
+
+  test('dialogs: focus stays inside, shortcuts are off, Escape returns focus to the opener', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const c = page.locator('.card').first();
+    const vid = await c.getAttribute('data-vid');
+    await c.hover();
+    await c.locator('.more-btn').click();
+    await page.click('.menu-item:has-text("Save to list")');
+    assert.ok(await page.evaluate(() => document.querySelector('#dialog').open));
+    for (let i = 0; i < 8; i++) await page.keyboard.press('Tab');
+    assert.ok(await page.evaluate(() => document.querySelector('#dialog').contains(document.activeElement)), 'focus trapped');
+    const likesBefore = await page.evaluate(() => localStorage.getItem('customtube:likes'));
+    await page.locator('#new-list-name').blur();
+    await page.keyboard.press('l');
+    assert.equal(await page.evaluate(() => localStorage.getItem('customtube:likes')), likesBefore, 'shortcut ignored while open');
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.evaluate(() => document.querySelector('#dialog').open)));
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.more), vid, 'focus back on the ⋯ button');
+    await page.keyboard.press('?');
+    assert.ok(await page.evaluate(() => document.querySelector('#help').open));
+    await page.click('#help button:has-text("Close")');
+  });
+
+  test('undo of "Not interested" keeps an earlier dislike; a failed page offers Retry', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const c = page.locator('.card').nth(2);
+    const vid = await c.getAttribute('data-vid');
+    await page.evaluate((v) => localStorage.setItem('customtube:dislikes', JSON.stringify([v])), vid);
+    await page.goto(base + '/topics');
+    await page.click('.quick a[href="/browse?sort=recent"]');
+    await page.waitForSelector('.card');
+    const d = page.locator('.card').first();
+    const dv = await d.getAttribute('data-vid');
+    await page.evaluate((v) => {
+      const list = JSON.parse(localStorage.getItem('customtube:dislikes'));
+      list.push(v);
+      localStorage.setItem('customtube:dislikes', JSON.stringify(list));
+    }, dv);
+    await page.goto(base + '/browse?sort=recent');
+    await page.waitForSelector(`.card[data-vid="${dv}"]`);
+    const card = page.locator(`.card[data-vid="${dv}"]`);
+    await card.hover();
+    await card.locator('.more-btn').click();
+    await page.click('.menu-item:has-text("Not interested")');
+    await page.click('.toast-undo');
+    const dislikes = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:dislikes')));
+    assert.ok(dislikes.includes(dv) && dislikes.includes(vid), 'earlier dislikes survive Undo');
+    await page.evaluate(() => localStorage.removeItem('customtube:dislikes'));
+    await page.waitForTimeout(350); // the toast fades out
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('#toast')).visibility), 'hidden');
+
+    let fail = true;
+    await page.route('**/api/feed', (route) => (fail ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }) : route.continue()));
+    await page.goto(base + '/');
+    await page.waitForSelector('button:has-text("Retry")');
+    fail = false;
+    await page.click('button:has-text("Retry")');
+    await page.waitForSelector('.card');
+    await page.unroute('**/api/feed');
+    // the injected 500 is logged by the browser; it was expected here
+    for (let i = errors.length - 1; i >= 0; i--) if (/status of 500 .*\/api\/feed$/.test(errors[i])) errors.splice(i, 1);
+  });
+
+  test('two tabs: a change in one is not overwritten by the other', async () => {
+    const other = await page.context().newPage();
+    await other.goto(base + '/library');
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const [a, b] = await page.$$eval('.card', (els) => els.slice(0, 2).map((e) => e.dataset.vid));
+    await page.evaluate(() => localStorage.setItem('customtube:likes', '[]'));
+    await other.reload();
+    await page.locator(`.card[data-vid="${a}"] .card-link`).click();
+    await page.click('#like');
+    // the other tab now saves something else; it must not drop the like
+    await other.evaluate((v) => document.querySelector(`[data-later="${v}"]`) ?? null, b);
+    await other.goto(base + '/history');
+    await other.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+    await other.keyboard.press('Escape');
+    await other.evaluate((v) => {
+      // toggle Watch later from the other tab through the app's own handler
+      const btn = document.createElement('button');
+      btn.dataset.later = v;
+      document.body.append(btn);
+      btn.click();
+    }, b);
+    const likes = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:likes')));
+    assert.ok(likes.includes(a), 'the like from the first tab survives');
+    assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:later')))).includes(b));
+    await other.close();
+  });
+
+  test('malformed search links and double-clicked Add are handled', async () => {
+    await page.goto(base + '/search/100%25%');
+    await page.waitForSelector('text=That search link is malformed.');
+    await page.goto(base + '/mine');
+    await page.route('**/api/oembed*', async (route) => {
+      await new Promise((r) => setTimeout(r, 300));
+      await route.continue();
+    });
+    await page.fill('#add-url', 'https://youtu.be/dblClick001');
+    await page.dblclick('#add-video button[type="submit"]');
+    await page.waitForSelector('.card[data-vid="dblClick001"]');
+    await page.unroute('**/api/oembed*');
+    const custom = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:custom')));
+    assert.equal(custom.filter((c) => c.vid === 'dblClick001').length, 1);
+  });
+
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {
     await page.setViewportSize({ width: 375, height: 800 });
     for (const p of ['/', '/settings', '/topics', '/about']) {
@@ -376,6 +521,6 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       assert.ok(overflow <= 0, `${p} overflows by ${overflow}px`);
     }
-    assert.deepEqual(errors, []);
+    assert.deepEqual(errors, [], JSON.stringify(errors));
   });
 });
