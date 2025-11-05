@@ -1,0 +1,10 @@
+node_modules/
+# The data export and YouTube metadata are downloaded, not committed (see README).
+data/
+# Model cache for query embeddings.
+.cache/
+test-results/
+.DS_Store
+*.log
+.env
+.claude/

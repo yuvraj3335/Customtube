@@ -1,2 +1,150 @@
-# Customtube
-A curated, recommendation-driven Instagram viewing app
+# Custom Tube
+
+A YouTube front end where you decide what your feed shows. It starts from the videos Hacker News has
+recommended for nearly 20 years (6,454 videos, 39,834 labeled HN comments, 150 topics), and you add,
+filter and mix from there.
+
+- **Home** is a feed made from several sources: HN classics, recent favourites, topics you haven't
+  explored, videos similar to your likes, what the same HN people also recommended, topics you follow,
+  hidden gems, and videos you added yourself. Hover a card to see why it's there.
+- **Customize** chooses exactly what Home may show and how it's mixed:
+  - formats: Shorts (up to 3 minutes), regular videos, long videos (over an hour)
+  - kinds of video: talk, lecture, documentary, tutorial, comedy, music and the rest
+  - topics to follow (they get their own spot in the feed) or mute (never shown)
+  - channels to hide
+  - a weight from 0 to 5 for every feed source (0 turns it off)
+  - news-only videos and videos HN only cited (off by default)
+  - export everything to a file and import it in another browser
+- **My videos** adds any YouTube video or Short by pasting its link. They join your feed, as often as
+  you set.
+- **Search** matches by meaning (the `bge-small-en-v1.5` model the data's vectors were made with), plus
+  keywords and topics, with filters and sorting.
+- **Every video page** shows what HN actually said about it, linking back to the comments, with "Up
+  next" built from shared HN recommenders and similar topics.
+- No accounts and no tracking. Your likes, history, settings and added videos stay in your browser;
+  the server keeps none of it. Videos play through YouTube's privacy-enhanced embed, and only after
+  you press play.
+
+## Run it
+
+Needs Node 22.23.4+ (or 24.22.1+). `nvm use` picks the version from `.nvmrc`.
+
+```bash
+npm install
+npm run data:fetch      # downloads the HackerTube data export (~18 MB) into data/raw/
+npm start               # http://127.0.0.1:8080
+```
+
+On first start the search model (~34 MB) downloads from Hugging Face into `.cache/models/`. Until it
+is ready, search uses keywords only.
+
+### Settings
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT`, `HOST` | `8080`, `127.0.0.1` | Where the server listens |
+| `CUSTOMTUBE_DATA_DIR` | `data/raw/hackertube-data` | The unzipped data export |
+| `CUSTOMTUBE_YOUTUBE_META` | `data/youtube_meta.jsonl` | Optional YouTube metadata (below) |
+| `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
+| `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
+| `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` |
+| `TRUST_PROXY` | off | `1` uses the first `X-Forwarded-For` address for rate limits (only behind your own proxy) |
+
+### YouTube metadata (for Shorts, lengths, dates and view counts)
+
+The data export has no durations, view counts or upload dates, because YouTube's terms don't allow
+redistributing them. Without them, everything works except: the Shorts / regular / long format
+choice for HN videos (it still applies to videos you add yourself), the length and upload-date
+filters, hidden gems, and the sorts by date, views and like ratio.
+
+To get them, you need a free YouTube Data API key (about 5 minutes, no credit card):
+
+1. Open https://console.cloud.google.com/ and create a project.
+2. Under **APIs & Services → Library**, enable **YouTube Data API v3**.
+3. Under **APIs & Services → Credentials**, create an **API key**, and restrict it to the YouTube
+   Data API v3.
+4. Run the fetch (about 130 requests, well inside the free daily quota). Keep the key out of files:
+
+```bash
+YOUTUBE_API_KEY=your-key npm run data:youtube
+```
+
+Then restart the server. The script resumes where it stopped. YouTube's developer policies expect
+stored data to be refreshed now and then: delete `data/youtube_meta.jsonl` and run it again.
+
+## How the feed works
+
+All the ranking happens on the server, per request, from what the browser sends: likes, dislikes,
+the last 200 videos opened, a random seed that changes on each page load, and the curation settings.
+The same inputs always give the same feed, so scrolling never repeats or skips a video.
+
+- **Score.** A video's score is the number of different months HN recommended it in, with months
+  that had a strong recommendation counting half extra. Lasting recommendations beat one viral spike.
+- **Sources.** Each source puts its candidates in a weighted random order (Efraimidis–Spirakis), e.g.
+  classics weighted by score², similar videos by embedding similarity to your likes. The sources then
+  take turns in proportion to their mix weights (smooth weighted round-robin), skipping videos already
+  used and avoiding three in a row from one channel.
+- **Dislikes** drop videos almost identical to a disliked one (cosine ≥ 0.88), push similar ones down,
+  and halve the chance of that channel.
+- **Left out by default:** news-only videos, videos HN only cited, duplicate uploads of the same talk,
+  videos YouTube won't play in an embed (when metadata says so), and anything you've opened, liked or
+  disliked.
+- **Cost.** The expensive part (dislike penalties and similarity to your likes, about 140 ms for a
+  200-like profile) is cached per profile and settings, so a new seed costs about 2 ms.
+
+## API
+
+All endpoints answer `GET` with JSON and reject unknown, invalid or empty parameters with a 400
+(an empty filter is never read as "no filter").
+
+| Endpoint | Parameters |
+|---|---|
+| `/api/feed` | `like`, `dislike`, `seen` (ids, ≤200 each), `seed`, `offset`, `n` (≤60); curation: `formats`, `types`, `follow_topics`, `mute_topics`, `mute_channels`, `mix`, `news`, `cited`. Also takes `POST` with a JSON body (what the client uses, since a big profile doesn't fit in a URL), e.g. `{"like": ["…"], "types": ["talk"], "mix": {"explore": 0}, "mute_channels": ["Some Channel"], "news": true}`. In the `GET` form lists are comma-separated, `mute_channels` names are URI-encoded first, and `mix` is `classics:3,explore:0`. Rate limited per client |
+| `/api/list` | `cat` or `area`, `offset`, `n`, and filters: `type`, `level`, `evergreen`, `sort`; with metadata also `dur`, `date`, `gems` |
+| `/api/search` | `q` (≤200 chars) and the same filters; `sort` defaults to `relevance`. Rate limited per client |
+| `/api/video` | `vid`: the card, HN stats and comments |
+| `/api/related` | `vid`, `n` |
+| `/api/docs` | `vids`: cards for saved lists, in order |
+| `/api/oembed` | `vid`: title and channel of any YouTube video, for My videos (via YouTube's public oEmbed; rate limited) |
+| `/api/browse`, `/api/stats`, `/api/config` | none |
+
+## Develop and test
+
+```bash
+npm run lint
+npm test            # unit + API tests on a synthetic fixture (no download needed)
+npm run test:e2e    # the real client in headless Chrome
+npm run test:all
+```
+
+The browser tests use the real data and the real model when `data/raw/hackertube-data` exists, and
+the fixture otherwise. They need Google Chrome installed, or `CHROME_PATH` set to a Chromium-family
+browser. Every request that would leave localhost (thumbnails, YouTube) is answered locally.
+
+```
+src/
+  server.js      HTTP server: API routes, app shell with per-page <meta>, static files
+  data.js        loads the export, re-orders embeddings, finds duplicate uploads, topic centroids
+  feed.js        the Home feed sources and how they're interleaved
+  curation.js    the viewer's feed settings: parsing, filtering, mix pattern
+  search.js      semantic + keyword search, weak-match detection
+  related.js     "Up next"
+  filters.js     list/search filters and sorts
+  embedder.js    query embeddings with transformers.js (bge-small-en-v1.5, CLS pooling)
+  npy.js, rng.js, vec.js, lru.js, ratelimit.js, http.js
+public/          the client (no build step): index.html, app.js, styles.css
+scripts/         data:fetch and data:youtube
+test/            unit, api and e2e tests, plus the fixture generator
+```
+
+## Credits and licence
+
+The video data comes from the [HackerTube](https://hackertube.org) data export (exported 2026-10-31),
+released under the [Open Data Commons Attribution License (ODC-By) v1.0](https://opendatacommons.org/licenses/by/1-0/),
+and derived from the [open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news)
+archive. Hacker News data is provided by Y Combinator, and comments remain the work of their authors.
+The labels, summaries and topics were written by an LLM, so expect a few to be off. Video titles and
+channel names belong to their creators.
+
+The data is not committed to this repository; `npm run data:fetch` downloads it. Custom Tube is an
+independent project, not affiliated with HackerTube, YouTube, Google, Hacker News or Y Combinator.

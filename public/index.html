@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--HEAD-->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/styles.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#view">Skip to content</a>
+<header class="top">
+  <a class="brand" href="/" aria-label="Custom Tube home"><span class="brand-mark">Custom</span><span class="brand-word">Tube</span></a>
+  <form id="search" class="search" role="search">
+    <input id="q" name="q" type="search" placeholder="Search talks, lectures, topics…" autocomplete="off" maxlength="200" aria-label="Search videos">
+    <button type="submit" class="search-btn" aria-label="Search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+    </button>
+  </form>
+  <button id="theme" class="icon-btn" type="button" aria-label="Switch light or dark theme">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8A9.4 9.4 0 0 0 12 3z"/></svg>
+  </button>
+</header>
+<nav class="tabs" aria-label="Sections">
+  <a href="/" data-nav="/">Home</a>
+  <a href="/topics" data-nav="/topics">Topics</a>
+  <a href="/browse" data-nav="/browse">All videos</a>
+  <a href="/liked" data-nav="/liked">Liked</a>
+  <a href="/later" data-nav="/later">Watch later</a>
+  <a href="/history" data-nav="/history">History</a>
+  <a href="/mine" data-nav="/mine">My videos</a>
+  <a href="/settings" data-nav="/settings">Customize</a>
+  <a href="/about" data-nav="/about">About</a>
+</nav>
+<main id="view" tabindex="-1"><p class="status">Loading…</p></main>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="help" class="help" hidden></div>
+<noscript><p class="status">Custom Tube needs JavaScript to run.</p></noscript>
+</body>
+</html>
