@@ -5,6 +5,7 @@
 
 export const PLAYER_ORIGIN = 'https://www.youtube-nocookie.com';
 const ENDED = 0;
+const PLAYING = 1;
 
 /**
  * @param {{ vid: string, title: string, start?: number, autoplay?: boolean,
@@ -31,6 +32,7 @@ export function createPlayer({ vid, title, start = 0, autoplay = true, onProgres
   const id = Math.floor(Math.random() * 1e9);
   let ready = false;
   let ended = false;
+  let offVideo = false;
   let duration = 0;
   const post = (msg) => iframe.contentWindow?.postMessage(JSON.stringify({ ...msg, id, channel: 'widget' }), PLAYER_ORIGIN);
 
@@ -54,9 +56,19 @@ export function createPlayer({ vid, title, start = 0, autoplay = true, onProgres
     if (!msg || typeof msg !== 'object') return;
     if (msg.event === 'onReady' || msg.event === 'initialDelivery' || msg.event === 'infoDelivery') ready = true;
     const info = msg.info && typeof msg.info === 'object' ? msg.info : {};
+    // The embed can switch to another video (end screen, channel links): then what it reports
+    // isn't about our video, so nothing is saved and autoplay doesn't fire for it.
+    const playing = info.videoData?.video_id;
+    if (playing && playing !== vid) {
+      offVideo = true;
+      return;
+    }
+    if (playing === vid) offVideo = false;
+    if (offVideo) return;
     if (Number.isFinite(info.duration) && info.duration > 0) duration = info.duration;
     if (Number.isFinite(info.currentTime) && duration > 0) onProgress?.(info.currentTime, duration);
     const stateNow = msg.event === 'onStateChange' ? msg.info : info.playerState;
+    if (stateNow === PLAYING) ended = false; // a replay can end (and autoplay) again
     if (stateNow === ENDED && !ended) {
       ended = true;
       onEnded?.();

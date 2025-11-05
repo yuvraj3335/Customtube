@@ -62,7 +62,9 @@ export function createPalette({ h, api, navigate, thumbUrl, commands }) {
       }
     }
     if (!items.length) list.append(h('li', { class: 'palette-group', role: 'presentation' }, 'No matches'));
-    input.setAttribute('aria-activedescendant', items.length ? `palette-opt-${active}` : '');
+    input.setAttribute('aria-expanded', String(items.length > 0));
+    if (items.length) input.setAttribute('aria-activedescendant', `palette-opt-${active}`);
+    else input.removeAttribute('aria-activedescendant');
   }
 
   function select(i) {
@@ -81,6 +83,8 @@ export function createPalette({ h, api, navigate, thumbUrl, commands }) {
   }
 
   async function update() {
+    // Any reply still on its way is now stale, even if this query asks for nothing.
+    const mine = ++seq;
     const q = input.value.trim();
     const cmds = commands();
     const fuse = new Fuse(cmds, { keys: ['label', 'keywords'], threshold: 0.4, ignoreLocation: true });
@@ -91,7 +95,6 @@ export function createPalette({ h, api, navigate, thumbUrl, commands }) {
       { title: 'Go to', items: matched },
     ]);
     if (q.length < 2) return;
-    const mine = ++seq;
     let res;
     try {
       res = await api(`/api/suggest?q=${encodeURIComponent(q)}`);

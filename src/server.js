@@ -43,6 +43,8 @@ const STATIC_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json',
+  '.png': 'image/png',
+  '.txt': 'text/plain; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
 };
 
@@ -179,13 +181,32 @@ function loadStatic(publicDir) {
   for (const name of readdirSync(publicDir)) {
     const type = STATIC_TYPES[path.extname(name)];
     if (!type || name === 'index.html') continue;
-    const body = readFileSync(path.join(publicDir, name));
-    // Compressed once here rather than on every request, with an ETag for 304 answers.
-    const gz = gzipSync(body, { level: 9 });
-    const etag = `"${createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
-    files.set(ROOT_FILES.has(name) ? `/${name}` : `/static/${name}`, { body, gz: gz.length < body.length ? gz : null, etag, type, root: ROOT_FILES.has(name) });
+    files.set(ROOT_FILES.has(name) ? `/${name}` : `/static/${name}`, { body: readFileSync(path.join(publicDir, name)), type, root: ROOT_FILES.has(name) });
   }
-  return files;
+  // Every deploy gets a version from the content of the client files. Pages ask for
+  // /static/app.js?v=<version>, and the service worker names its cache after it, so a browser
+  // never mixes a new page with an old cached script.
+  const version = createHash('sha1')
+    .update([...files.keys()].sort().map((k) => `${k}:${createHash('sha1').update(files.get(k).body).digest('hex')}`).join('|'))
+    .digest('hex')
+    .slice(0, 12);
+  const sw = files.get('/sw.js');
+  if (sw) sw.body = Buffer.from(String(sw.body).replaceAll('__VERSION__', version));
+  for (const f of files.values()) {
+    // Compressed once here rather than on every request, with an ETag per encoding.
+    const gz = gzipSync(f.body, { level: 9 });
+    f.gz = gz.length < f.body.length ? gz : null;
+    f.etag = `"${createHash('sha1').update(f.body).digest('base64url').slice(0, 16)}"`;
+  }
+  return { files, version };
+}
+
+/** Whether an If-None-Match header matches `etag` (weak comparison, lists and "*" allowed). */
+function etagMatches(header, etag) {
+  if (!header) return false;
+  if (header.trim() === '*') return true;
+  const bare = etag.replace(/^W\//, '');
+  return header.split(',').some((t) => t.trim().replace(/^W\//, '').replace(/-gz"$/, '"') === bare);
 }
 
 // ---------- POST bodies ----------
@@ -289,6 +310,8 @@ export function createApp({
   prepCpuBudget = createRateLimiter({ capacity: 1000, refillPerSecond: 300 }),
   // Searches across all clients (each costs ~5-15 ms).
   searchGlobalLimiter = createRateLimiter({ capacity: 60, refillPerSecond: 30 }),
+  // As-you-type suggestions (each ~2-3 ms), across all clients.
+  suggestGlobalLimiter = createRateLimiter({ capacity: 200, refillPerSecond: 100 }),
   // Everything else in the API is cheap, but not free: a generous per-client budget.
   apiLimiter = createRateLimiter({ capacity: 240, refillPerSecond: 40 }),
   fetchImpl = globalThis.fetch,
@@ -299,8 +322,11 @@ export function createApp({
   const oembedCache = new LRUCache({ max: 2000 });
   const relatedCache = new LRUCache({ max: 2000 });
   const searchCache = new LRUCache({ max: 500 });
-  const staticFiles = loadStatic(publicDir);
-  const shell = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
+  const suggestCache = new LRUCache({ max: 2000 });
+  const { files: staticFiles, version } = loadStatic(publicDir);
+  const shell = readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+    .replace('/static/app.js"', `/static/app.js?v=${version}"`)
+    .replace('/static/styles.css"', `/static/styles.css?v=${version}"`);
   if (!shell.includes('<!--HEAD-->')) throw new Error('public/index.html must contain <!--HEAD-->');
   const feedCache = new LRUCache({ max: 300 }); // full feeds, per (profile, curation, seed)
   const prepCache = new LRUCache({ max: 150 }); // seed-independent work, per (profile, curation)
@@ -544,8 +570,16 @@ export function createApp({
       const q = (params.get('q') ?? '').trim();
       if (!q) throw badRequest('"q" is required');
       if (q.length > MAX_QUERY || searchable(q).length > MAX_QUERY * 2) throw badRequest(`"q" must be at most ${MAX_QUERY} characters`);
-      const out = suggest(ds, q);
-      sendJson(req, res, 200, { videos: out.videos.map((vid) => cardDto(ds.byVid.get(vid))), topics: out.topics });
+      const key = q.toLowerCase();
+      let body = suggestCache.get(key);
+      if (!body) {
+        const all = suggestGlobalLimiter.take('*');
+        if (!all.ok) throw new HttpError(503, 'busy, try again shortly', { 'retry-after': String(all.retryAfter) });
+        const out = suggest(ds, q);
+        body = { videos: out.videos.map((vid) => cardDto(ds.byVid.get(vid))), topics: out.topics };
+        suggestCache.set(key, body);
+      }
+      sendJson(req, res, 200, body);
     },
 
     '/api/docs': (req, res, params) => {
@@ -633,12 +667,16 @@ export function createApp({
     const file = staticFiles.get(pathname);
     if (file) {
       // The service worker must be re-checked on every load, or app updates never reach users.
-      const headers = { ...SECURITY_HEADERS, 'content-type': file.type, 'cache-control': file.root ? 'no-cache' : 'public, max-age=300', etag: file.etag, vary: 'Accept-Encoding' };
-      if (req.headers['if-none-match'] === file.etag) {
+      // A versioned URL (?v=<this deploy>) never changes, so it can be cached for good.
+      const pinned = url.searchParams.get('v') === version;
+      const cache = file.root ? 'no-cache' : pinned ? 'public, max-age=31536000, immutable' : 'public, max-age=300';
+      const gzip = Boolean(file.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || ''));
+      const etag = gzip ? file.etag.replace(/"$/, '-gz"') : file.etag;
+      const headers = { ...SECURITY_HEADERS, 'content-type': file.type, 'cache-control': cache, etag, vary: 'Accept-Encoding' };
+      if (etagMatches(req.headers['if-none-match'], file.etag)) {
         res.writeHead(304, headers);
         return res.end();
       }
-      const gzip = file.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
       const payload = gzip ? file.gz : file.body;
       if (gzip) headers['content-encoding'] = 'gzip';
       headers['content-length'] = payload.length;

@@ -211,10 +211,12 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.equal(await page.textContent('#follow-topic'), 'Following');
     await page.waitForSelector('.card');
     await page.locator('.card .card-link').first().click();
-    await page.waitForSelector('#mute-channel');
+    await page.waitForSelector('#watch-more');
     const channel = await page.locator('.owner b').first().textContent();
-    await page.click('#mute-channel');
-    assert.equal(await page.textContent('#mute-channel'), 'Channel hidden');
+    await page.click('#watch-more');
+    await page.click(`.menu-item:has-text("Hide ")`);
+    await page.waitForSelector('#toast.on');
+    assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:prefs')).muteChannels)).includes(channel));
 
     const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
     await page.click('nav.tabs a[href="/"]');
@@ -283,9 +285,9 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.deepEqual(await order(), [vids[1], vids[0], vids[2]]);
     await page.click('.list-row >> nth=2 >> [aria-label$="from this list"]');
     await page.waitForFunction(() => document.querySelectorAll('.list-row').length === 2);
-    await page.click('.playall, a.pill:has-text("Play all")');
+    await page.click('a.pill:has-text("Open on YouTube")');
     // the click handler fills in the playlist link before the (intercepted) navigation
-    const href = await page.getAttribute('a.pill:has-text("Play all")', 'href');
+    const href = await page.getAttribute('a.pill:has-text("Open on YouTube")', 'href');
     assert.equal(href, `https://www.youtube.com/watch_videos?video_ids=${vids[1]},${vids[0]}`);
     await page.click('#delete-list');
     await page.waitForURL('**/lists');
@@ -545,7 +547,8 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     const vid = await page.locator('.home .grid .card').first().getAttribute('data-vid');
     await page.goto(`${base}/watch/${vid}`);
     await page.waitForSelector('.upnext .card');
-    const next = await page.locator('.upnext .card').first().getAttribute('data-vid');
+    // autoplay picks from Up next, skipping videos already watched in this chain or opened before
+    const upNext = await page.$$eval('.upnext .card', (els) => els.map((e) => e.dataset.vid));
     await page.click('#poster');
     const src = await page.locator('.player iframe').getAttribute('src');
     assert.match(src, /enablejsapi=1/);
@@ -554,7 +557,8 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     const saved = await page.evaluate((v) => JSON.parse(localStorage.getItem('customtube:progress'))[v], vid);
     assert.equal(saved[0], 600, 'finished');
     await page.click('#play-next');
-    await page.waitForURL(`**/watch/${next}?autoplay=1`);
+    await page.waitForURL((u) => u.searchParams.get('autoplay') === '1' && !u.pathname.endsWith(vid));
+    assert.ok(upNext.includes(page.url().split('/watch/')[1].split('?')[0]), 'the next video comes from Up next');
     await page.waitForSelector('.player iframe'); // autoplay: no poster click needed
 
     // a half-watched video offers to resume, and starts there
@@ -618,7 +622,7 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.evaluate(() => localStorage.clear());
     await page.goto(base + '/');
     await page.waitForSelector('.welcome');
-    const chips = page.locator('.welcome .chip');
+    const chips = page.locator('.welcome .chip[data-topic]');
     const ids = [await chips.nth(0).getAttribute('data-topic'), await chips.nth(1).getAttribute('data-topic')];
     await chips.nth(0).click();
     await chips.nth(1).click();
@@ -660,6 +664,70 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await p.waitForSelector('nav.tabs a[href="/library"].on');
     assert.match(await p.title(), /Custom Tube/);
     await ctx.close();
+  });
+
+  test('round 9: autoplay never ping-pongs, Stop list keeps the player, Following shows videos, Play all stays in the app, quick search drops stale replies', async () => {
+    await page.evaluate(() => {
+      localStorage.clear();
+      localStorage.setItem('customtube:welcomed', 'true');
+      sessionStorage.clear();
+    });
+    await page.goto(base + '/');
+    await page.waitForSelector('.home .grid .card');
+    const start = await page.locator('.home .grid .card').first().getAttribute('data-vid');
+    await page.goto(`${base}/watch/${start}?autoplay=1`);
+    const visited = [start];
+    for (let hop = 0; hop < 5; hop++) {
+      await page.waitForSelector('.countdown');
+      await page.click('#play-next');
+      await page.waitForURL(/autoplay=1/);
+      await page.waitForFunction((prev) => !location.pathname.endsWith(prev), visited[visited.length - 1]);
+      visited.push(page.url().split('/watch/')[1].split('?')[0]);
+    }
+    assert.equal(new Set(visited).size, visited.length, `autoplay revisited a video: ${visited.join(' > ')}`);
+
+    // a list: Stop keeps the same player element
+    await page.evaluate((ids) => localStorage.setItem('customtube:lists', JSON.stringify([{ id: 'stop1111', name: 'Stop test', vids: ids, created: new Date().toISOString() }])), visited.slice(0, 3));
+    await page.goto(base + '/list/stop1111');
+    await page.click('#play-list');
+    await page.waitForSelector('.queue-head');
+    await page.waitForSelector('.player iframe');
+    await page.evaluate(() => (document.querySelector('.player iframe').dataset.mark = 'same'));
+    await page.click('#stop-list');
+    await page.waitForFunction(() => !document.querySelector('.queue-head'));
+    assert.equal(await page.evaluate(() => document.querySelector('.player iframe')?.dataset.mark), 'same');
+
+    // Following with no follows: pick, then Show videos
+    await page.goto(base + '/?tab=following');
+    await page.waitForSelector('#show-following');
+    await page.locator('.welcome .chip[data-topic]').first().click();
+    const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
+    await page.click('#show-following');
+    assert.equal((await feed).request().postDataJSON().mix.following, 5);
+    await page.waitForSelector('.home .grid .card');
+
+    // Play all on Home plays in the app
+    await page.goto(base + '/');
+    await page.waitForSelector('.home .grid .card');
+    const first = await page.locator('.home .grid .card').first().getAttribute('data-vid');
+    await page.click('#play-feed');
+    await page.waitForURL(`**/watch/${first}?autoplay=1`);
+    await page.waitForSelector('.queue-head');
+
+    // quick search: a slow reply for an old query never replaces the current list
+    await page.route('**/api/suggest?q=rust*', async (route) => {
+      await new Promise((r) => setTimeout(r, 700));
+      await route.continue();
+    });
+    await page.keyboard.press('Control+k');
+    await page.keyboard.type('rust');
+    await page.waitForTimeout(150);
+    for (let i = 0; i < 3; i++) await page.keyboard.press('Backspace');
+    await page.waitForTimeout(900);
+    const labels = await page.locator('.palette-item .label').allTextContents();
+    assert.ok(!labels.some((l) => /rust/i.test(l)), labels.join(' | '));
+    await page.keyboard.press('Escape');
+    await page.unroute('**/api/suggest?q=rust*');
   });
 
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {

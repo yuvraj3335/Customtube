@@ -579,7 +579,7 @@ function saveToListDialog(vid, opener) {
 }
 
 function playAllLink(getVids) {
-  const a = h('a', { class: 'pill', href: 'https://www.youtube.com/', target: '_blank', rel: 'noopener', title: 'Open up to 50 videos from this page as a YouTube playlist' }, icon('play'), 'Play all on YouTube');
+  const a = h('a', { class: 'pill', href: 'https://www.youtube.com/', target: '_blank', rel: 'noopener', title: 'Open up to 50 videos from this page as a YouTube playlist (no progress or autoplay)' }, icon('external'), 'Open on YouTube');
   a.addEventListener('click', (e) => {
     const vids = [...new Set(getVids())].slice(0, 50);
     if (!vids.length) {
@@ -771,11 +771,11 @@ async function home(token, { restore = false } = {}) {
 
   const tabs = h(
     'div',
-    { class: 'home-tabs', role: 'tablist', 'aria-label': 'Feeds' },
+    { class: 'home-tabs', role: 'navigation', 'aria-label': 'Feeds' },
     [
       ['foryou', 'For you', '/'],
       ['following', 'Following', '/?tab=following'],
-    ].map(([id, label, href]) => h('a', { class: `chip${tab === id ? ' on' : ''}`, href, role: 'tab', 'aria-selected': String(tab === id) }, label)),
+    ].map(([id, label, href]) => h('a', { class: `chip${tab === id ? ' on' : ''}`, href, 'aria-current': tab === id ? 'page' : null }, label)),
     h('a', { class: 'chip', href: '/settings' }, icon('sliders'), 'Customize'),
   );
   section.append(tabs);
@@ -803,7 +803,16 @@ async function home(token, { restore = false } = {}) {
   }
 
   if (tab === 'following' && !state.prefs.followTopics.length) {
-    section.append(h('div', { class: 'empty' }, h('h2', {}, 'Follow a few topics'), h('p', { class: 'sub mx-auto' }, 'Videos from the topics you follow will show up here.'), areas ? topicPicker(areas, 18) : null));
+    section.append(
+      h(
+        'section',
+        { class: 'welcome', 'aria-labelledby': 'follow-title' },
+        h('h2', { id: 'follow-title' }, 'Follow a few topics'),
+        h('p', { class: 'sub' }, 'Videos from the topics you follow show up here. Pick some, then show them.'),
+        areas ? topicPicker(areas, 18) : null,
+        h('div', { class: 'actions mt-4' }, h('button', { type: 'button', class: 'pill primary', id: 'show-following', onclick: () => (homeCache = null, route({ keepScroll: true })) }, icon('sparkles'), 'Show videos')),
+      ),
+    );
     return;
   }
 
@@ -815,6 +824,7 @@ async function home(token, { restore = false } = {}) {
         : warm
           ? `Tuned by ${plural(state.likes.length, 'like')}${state.dislikes.length ? ` and ${plural(state.dislikes.length, 'dislike')}` : ''}. Each card says why it’s here.`
           : 'HN classics, recent favourites and topics to explore. Like a few videos to tune this feed.',
+      h('button', { type: 'button', class: 'pill primary', id: 'play-feed', onclick: () => startQueue(vidsOnPage().slice(0, 100), tab === 'following' ? 'Following' : 'Your feed') }, icon('play'), 'Play all'),
       playAllLink(vidsOnPage),
     ),
   );
@@ -870,9 +880,17 @@ function topicPicker(areas, n) {
     .flatMap((a) => a.categories)
     .sort((a, b) => b.count - a.count)
     .slice(0, n);
+  const more = h('button', {
+    type: 'button',
+    class: 'chip more-topics',
+    onclick: (e) => {
+      e.currentTarget.parentElement.classList.add('expanded');
+      e.currentTarget.remove();
+    },
+  }, 'More topics…');
   return h(
     'div',
-    { class: 'chips' },
+    { class: 'chips picker' },
     top.map((c) => {
       const btn = h('button', { type: 'button', class: `chip${state.prefs.followTopics.includes(c.id) ? ' on' : ''}`, 'aria-pressed': String(state.prefs.followTopics.includes(c.id)), dataset: { topic: c.id } }, c.name);
       btn.addEventListener('click', () => {
@@ -883,6 +901,7 @@ function topicPicker(areas, n) {
       });
       return btn;
     }),
+    more,
   );
 }
 
@@ -1071,6 +1090,8 @@ function startQueue(ids, name) {
  * @param {{ vid: string, title: string, nextUp: () => ({ vid: string, title: string }|null) }} opts
  */
 function mountPlayer(player, { vid, title, nextUp }) {
+  // Arriving any way but autoplay starts a new chain.
+  if (new URLSearchParams(location.search).get('autoplay') !== '1') chain.set([]);
   const start = resumeAt(vid);
   const begin = () => {
     const p = createPlayer({
@@ -1083,6 +1104,9 @@ function mountPlayer(player, { vid, title, nextUp }) {
         if (d) saveProgress(vid, d, d);
         const next = state.autoplay ? nextUp() : null;
         if (next) countdown(player, next);
+        else if (state.autoplay && chain.get().length >= AUTOPLAY_MAX) {
+          toast(`Autoplay paused after ${AUTOPLAY_MAX} videos in a row. Still watching? Pick the next one from Up next.`);
+        }
       },
     });
     cleanups.push(() => p.destroy());
@@ -1107,6 +1131,8 @@ function countdown(player, next) {
   let timer = null;
   const go = () => {
     clearInterval(timer);
+    const current = location.pathname.split('/').pop();
+    chain.set([...chain.get(), current]);
     navigate(`/watch/${next.vid}?autoplay=1`);
   };
   const overlay = h(
@@ -1167,7 +1193,8 @@ function shareButton(url, title) {
   }, icon('share'), 'Share');
 }
 
-const AVATAR_COLORS = ['#e5482d', '#2f6fdb', '#1f9d63', '#9b51e0', '#d97706', '#0e9aa7', '#c2185b', '#5c6bc0'];
+// All of these meet 4.5:1 with white text.
+const AVATAR_COLORS = ['#c93a20', '#2563c9', '#15803d', '#8b3fd1', '#b45309', '#0e7c86', '#be185d', '#4f5bd5'];
 function avatar(name) {
   let hsh = 0;
   for (const ch of String(name)) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
@@ -1177,7 +1204,38 @@ function avatar(name) {
 }
 
 /** The "Up next" column: the active queue when this video is in it, otherwise related videos. */
-async function renderUpNext(upnext, vid, token, related) {
+// Autoplay remembers the videos it chained through in this tab, so it never ping-pongs between
+// two related videos, and it pauses after AUTOPLAY_MAX in a row ("still watching?").
+const AUTOPLAY_MAX = 10;
+const chain = {
+  get() {
+    try {
+      return cleanIds(JSON.parse(sessionStorage.getItem('customtube:chain') || '[]'));
+    } catch {
+      return [];
+    }
+  },
+  set(ids) {
+    try {
+      sessionStorage.setItem('customtube:chain', JSON.stringify(ids.slice(-50)));
+    } catch {
+      // no session storage: autoplay still works, just without loop protection across loads
+    }
+  },
+};
+const finished = (vid) => {
+  const p = state.progress[vid];
+  return Boolean(p && p[0] >= p[1]);
+};
+
+/** The related video autoplay should pick: not already in the chain, unseen ones first. */
+function pickNext(vid, related) {
+  const visited = new Set([...chain.get(), vid]);
+  const fresh = related.filter((r) => !visited.has(r.vid) && !finished(r.vid));
+  return fresh.find((r) => !state.seen.includes(r.vid)) ?? fresh[0] ?? null;
+}
+
+async function renderUpNext(upnext, vid, token, related, setNext = () => {}) {
   const toggle = h('input', { type: 'checkbox', id: 'autoplay-toggle' });
   toggle.checked = state.autoplay;
   toggle.addEventListener('change', () => {
@@ -1200,10 +1258,13 @@ async function renderUpNext(upnext, vid, token, related) {
         h('button', {
           type: 'button',
           class: 'pill mt-2',
-          onclick: () => {
+          id: 'stop-list',
+          onclick: async () => {
+            // only the Up next column changes; the video keeps playing
             state.queue = null;
             store.set('queue', null);
-            route({ keepScroll: true });
+            setNext(await renderUpNext(upnext, vid, token, related, setNext));
+            upnext.querySelector('#autoplay-toggle')?.focus();
           },
         }, 'Stop playing this list'),
       ),
@@ -1214,7 +1275,9 @@ async function renderUpNext(upnext, vid, token, related) {
     return item ? { vid: item.vid, title: item.title } : null;
   }
   upnext.replaceChildren(head, related.length ? h('div', { class: 'list' }, related.map(card)) : h('p', { class: 'status' }, 'Nothing related yet.'));
-  return related[0] ? { vid: related[0].vid, title: related[0].title } : null;
+  if (chain.get().length >= AUTOPLAY_MAX) return null; // paused: see countdown()
+  const next = pickNext(vid, related);
+  return next ? { vid: next.vid, title: next.title } : null;
 }
 
 async function watchPage(token, vid) {
@@ -1249,7 +1312,6 @@ async function watchPage(token, vid) {
   };
   const laterPill = h('button', { type: 'button', class: 'pill', id: 'save-later', dataset: { later: d.vid } });
   renderLaterPill(laterPill, d.vid);
-  const hideChannel = channelButton(d.channel);
 
   const hn = d.hn || {};
   const facts = [
@@ -1291,7 +1353,7 @@ async function watchPage(token, vid) {
           'div',
           { class: 'owner' },
           h('div', {}, h('b', {}, d.channel), h('p', { class: 'sub' }, facts.join(' · '))),
-          h('div', { class: 'actions' }, voteBtn('like'), voteBtn('dislike'), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), hideChannel, h('a', { class: 'pill', href: `https://www.youtube.com/watch?v=${d.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
+          h('div', { class: 'actions' }, voteBtn('like'), voteBtn('dislike'), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
         ),
         d.duplicate_of ? h('p', { class: 'note' }, 'This is another upload of ', h('a', { href: `/watch/${d.duplicate_of}` }, 'a video in the collection'), '.') : null,
         d.yt?.embeddable === false ? h('p', { class: 'note' }, 'The uploader doesn’t allow this video to play on other sites. Open it on YouTube to watch.') : null,
@@ -1317,26 +1379,33 @@ async function watchPage(token, vid) {
   try {
     const rel = await api(`/api/related${qs({ vid: d.vid, n: 20 })}`);
     if (!current(token)) return;
-    nextUp = await renderUpNext(upnext, d.vid, token, rel.items);
+    nextUp = await renderUpNext(upnext, d.vid, token, rel.items, (n) => {
+      nextUp = n;
+    });
   } catch (err) {
     if (current(token)) upnext.replaceChildren(h('h2', {}, 'Up next'), h('p', { class: 'status' }, `Couldn’t load related videos. ${failure(err)}`));
   }
 }
 
-function channelButton(channel) {
-  const btn = h('button', { type: 'button', class: 'pill', id: 'mute-channel' });
-  const render = () => {
-    const muted = state.prefs.muteChannels.includes(channel);
-    btn.textContent = muted ? 'Channel hidden' : 'Hide channel';
-    btn.classList.toggle('on', muted);
-    btn.setAttribute('aria-pressed', String(muted));
-    btn.title = muted ? `Let ${channel} back into your feed` : `Never show ${channel} in your feed`;
-  };
-  btn.addEventListener('click', () => {
-    toast(toggleChannel(channel) ? `${channel} won't appear in your feed` : `${channel} can appear in your feed again`);
-    render();
+/** "More" on a video page: the less common actions, so the main row stays on one line. */
+function watchMoreButton({ channel, youtubeUrl }) {
+  const btn = h('button', { type: 'button', class: 'pill', id: 'watch-more', 'aria-haspopup': 'menu', 'aria-label': 'More actions' }, icon('more'), 'More');
+  btn.addEventListener('click', (e) => {
+    // keep the page-wide "click outside closes the menu" handler from closing it right away
+    e.stopPropagation();
+    if (openMenu?.button === btn) return closeMenu();
+    const muted = channel && state.prefs.muteChannels.includes(channel);
+    showMenu(
+      btn,
+      [
+        ...(channel
+          ? [[muted ? `Show ${channel} again` : `Hide ${channel}`, () => toast(toggleChannel(channel) ? `${channel} won't appear in your feed` : `${channel} can appear in your feed again`), 'ban']]
+          : []),
+        ['Open on YouTube', () => window.open(youtubeUrl, '_blank', 'noopener'), 'external'],
+      ],
+      'More actions',
+    );
   });
-  render();
   return btn;
 }
 
@@ -1381,7 +1450,7 @@ function customWatchPage(c) {
           'div',
           { class: 'owner' },
           h('div', {}, h('b', {}, c.channel || 'Unknown channel'), h('p', { class: 'sub' }, `${c.short ? 'Short' : 'Video'} you added · not from Hacker News`)),
-          h('div', { class: 'actions' }, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), c.channel ? channelButton(c.channel) : null, remove, h('a', { class: 'pill', href: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
+          h('div', { class: 'actions' }, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
         ),
       ),
     ),
@@ -1528,6 +1597,7 @@ async function aboutPage(token) {
         ext('https://huggingface.co/datasets/open-index/hacker-news', 'open-index/hacker-news'),
         ' archive. Hacker News data is provided by Y Combinator, and comments remain the work of their authors. Labels and summaries were written by an LLM, so expect a few to be off.',
       ),
+      h('p', { class: 'fine' }, 'Open-source software in this app: ', h('a', { href: '/static/licenses.txt', target: '_blank', rel: 'noopener' }, 'licences and notices'), '.'),
       h('p', { class: 'fine' }, 'Custom Tube is an independent project, not affiliated with HackerTube, YouTube, Google, Hacker News or Y Combinator. Video titles and channel names belong to their creators.', s.has_youtube_metadata ? ' Video statistics come from the YouTube Data API.' : ''),
     ),
   );
@@ -1880,10 +1950,10 @@ function newListForm(after) {
 async function libraryPage(token) {
   document.title = `Library · ${SITE}`;
   const sections = [
-    ['Watch later', '/later', state.later.slice().reverse()],
-    ['Liked', '/liked', state.likes.slice().reverse()],
-    ['History', '/history', state.seen.slice().reverse()],
-    ['My videos', '/mine', state.custom.map((c) => c.vid).reverse()],
+    ['Watch later', '/later', state.later.slice().reverse(), 'Tap the clock on any video to save it for later.'],
+    ['Liked', '/liked', state.likes.slice().reverse(), 'Videos you like land here and tune your Home feed.'],
+    ['History', '/history', state.seen.slice().reverse(), 'Videos you open show up here.'],
+    ['My videos', '/mine', state.custom.map((c) => c.vid).reverse(), 'Add any YouTube video or Short by pasting its link.'],
   ];
   const preview = sections.flatMap(([, , vids]) => vids.slice(0, 4));
   const items = await resolveCards(preview, token);
@@ -1900,13 +1970,14 @@ async function libraryPage(token) {
         h('div', { class: 'shelf-head' }, h('h2', {}, 'Lists'), h('a', { href: '/lists' }, state.lists.length ? `All ${state.lists.length}` : 'Make one')),
         state.lists.length ? h('div', { class: 'grid' }, state.lists.slice(-4).reverse().map(listCard)) : h('p', { class: 'hint' }, 'Group videos into your own playlists with “Save to list”.'),
       ),
-      sections.map(([title, href, vids]) => {
+      sections.map(([title, href, vids, emptyText]) => {
         const cards = vids.slice(0, 4).map((v) => byVid.get(v)).filter(Boolean);
+        const link = href === '/mine' ? h('a', { href }, 'Add videos') : cards.length ? h('a', { href }, 'See all') : null;
         return h(
           'section',
           { class: 'shelf' },
-          h('div', { class: 'shelf-head' }, h('h2', {}, title, h('span', { class: 'count' }, vids.length)), h('a', { href }, href === '/mine' ? 'Add videos' : 'See all')),
-          cards.length ? h('div', { class: 'grid' }, cards.map(card)) : h('p', { class: 'hint' }, 'Nothing here yet.'),
+          h('div', { class: 'shelf-head' }, h('h2', {}, title, cards.length ? h('span', { class: 'count' }, vids.length) : null), link),
+          cards.length ? h('div', { class: 'grid' }, cards.map(card)) : h('p', { class: 'hint' }, emptyText),
         );
       }),
     ),
@@ -2142,7 +2213,11 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
     else if (pathname === '/mine') await minePage(token);
     else notFound();
   } catch (err) {
-    if (current(token)) view.replaceChildren(h('p', { class: 'status' }, `Something went wrong. ${failure(err)}`));
+    if (current(token)) {
+      view.replaceChildren(
+        h('section', { class: 'empty' }, h('h1', {}, err instanceof TypeError ? 'You’re offline' : 'Something went wrong'), h('p', { class: 'sub mx-auto' }, failure(err)), h('button', { type: 'button', class: 'pill primary mt-4', id: 'retry-page', onclick: () => route({ keepScroll: true }) }, icon('undo'), 'Try again')),
+      );
+    }
   }
   if (!current(token)) return;
   if (restore || keepScroll) window.scrollTo(0, y);

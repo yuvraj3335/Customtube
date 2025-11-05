@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node --max-old-space-size=384 src/server.js",
-    "dev": "node scripts/build.js --watch & node --watch src/server.js",
+    "dev": "node scripts/dev.js",
     "data:fetch": "sh scripts/fetch-data.sh",
     "data:youtube": "node scripts/fetch-youtube-meta.js",
     "lint": "eslint .",

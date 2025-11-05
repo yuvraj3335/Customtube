@@ -7,13 +7,44 @@
   "display": "standalone",
   "background_color": "#0f0f10",
   "theme_color": "#e5482d",
-  "categories": ["entertainment", "education"],
+  "categories": [
+    "entertainment",
+    "education"
+  ],
   "icons": [
-    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
   ],
   "shortcuts": [
-    { "name": "Library", "url": "/library" },
-    { "name": "Customize your feed", "url": "/settings" }
+    {
+      "name": "Library",
+      "url": "/library"
+    },
+    {
+      "name": "Customize your feed",
+      "url": "/settings"
+    }
   ]
 }

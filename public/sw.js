@@ -1,9 +1,11 @@
 // Custom Tube service worker: makes the app installable and lets its screens open offline.
 // - Pages: network first, falling back to the cached app shell (every route is the same shell).
-// - /static/*: served from cache at once and refreshed in the background.
+// - /static/*: versioned per deploy, so served from cache, refreshed in the background.
 // - /api/*: always the network. Feeds and searches are never served stale.
-const CACHE = 'customtube-shell-v1';
-const SHELL = ['/', '/static/app.js', '/static/styles.css', '/static/favicon.svg', '/static/icon.svg', '/manifest.webmanifest'];
+// The server fills in __VERSION__ (a hash of this deploy's files); a new deploy is a new cache.
+const VERSION = '__VERSION__';
+const CACHE = `customtube-${VERSION}`;
+const SHELL = ['/', `/static/app.js?v=${VERSION}`, `/static/styles.css?v=${VERSION}`, '/static/favicon.svg', '/static/icon.svg', '/static/icon-192.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -31,7 +33,16 @@ self.addEventListener('fetch', (event) => {
 
   if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(request).catch(async () => (await caches.match('/')) || Response.error()),
+      fetch(request)
+        .then((res) => {
+          // keep the offline shell as fresh as the last page that loaded
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put('/', copy));
+          }
+          return res;
+        })
+        .catch(async () => (await caches.match('/')) || Response.error()),
     );
     return;
   }

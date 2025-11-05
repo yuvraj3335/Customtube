@@ -42,15 +42,17 @@ filter and mix from there.
 
 ## Run it
 
-Needs Node 22.23.4+ (or 24.22.1+). `nvm use` picks the version from `.nvmrc`.
+Needs Node 22.23.4+ (or 24.22.1+); `nvm use` picks the version from `.nvmrc`. `data:fetch` needs `curl` and
+`unzip`, and the browser tests need Google Chrome.
 
 ```bash
-npm install
-npm run data:fetch      # downloads the HackerTube data export (~18 MB) into data/raw/
+npm ci
+npm run data:fetch      # downloads the HackerTube data export (18 MB zip, 48 MB unpacked) into data/raw/
 npm start               # builds the client, then serves http://127.0.0.1:8080
 ```
 
-`npm run dev` rebuilds the client and restarts the server as you edit.
+`npm run dev` builds once, then rebuilds the client (JS and CSS) as you edit and restarts the server when
+server code or a rebuilt file changes. Ctrl+C or SIGTERM stops all of it.
 
 On first start the search model (~34 MB) downloads from Hugging Face into `.cache/models/`. Until it
 is ready, search uses keywords only.
@@ -131,17 +133,20 @@ The same inputs always give the same feed, so scrolling never repeats or skips a
 ## API
 
 All endpoints answer `GET` with JSON and reject unknown, invalid or empty parameters with a 400
-(an empty filter is never read as "no filter").
+(an empty filter is never read as "no filter"). Every `/api/*` route has a per-client rate limit
+(a burst of 240, then 40 per second; over it: 429 with `Retry-After`). Feed building, search and
+suggestions also have server-wide budgets; over those: 503 with `Retry-After`. `offset` is at most
+100,000 everywhere.
 
 | Endpoint | Parameters |
 |---|---|
-| `/api/feed` | `like`, `dislike` (ids, ≤500 each), `seen` (≤200), `seed`, `offset`, `n` (≤60); curation: `formats`, `types`, `follow_topics`, `mute_topics`, `mute_channels`, `mix`, `news`, `cited`. Also takes `POST` with a JSON body (what the client uses, since a big profile doesn't fit in a URL), e.g. `{"like": ["…"], "types": ["talk"], "mix": {"explore": 0}, "mute_channels": ["Some Channel"], "news": true}`. In the `GET` form lists are comma-separated, `mute_channels` names are URI-encoded first, and `mix` is `classics:3,explore:0`. Rate limited per client |
-| `/api/list` | `cat` or `area`, `offset`, `n`, and filters: `type`, `level`, `evergreen`, `sort`; with metadata also `dur`, `date`, `gems` |
-| `/api/search` | `q` (≤200 chars) and the same filters; `sort` defaults to `relevance`. Rate limited per client |
+| `/api/feed` | `like`, `dislike` (ids, ≤500 each), `seen` (≤200), `seed`, `offset`, `n` (≤60); curation: `formats`, `types`, `follow_topics`, `mute_topics`, `mute_channels`, `mix`, `news`, `cited`. Also takes `POST` with a JSON body (what the client uses, since a big profile doesn't fit in a URL), e.g. `{"like": ["…"], "types": ["talk"], "mix": {"explore": 0}, "mute_channels": ["Some Channel"], "news": true}`. The body is at most 64 KB (413 when larger) and must be `application/json` (415 otherwise); a POST takes nothing in its URL. In the `GET` form lists are comma-separated, `mute_channels` names are URI-encoded first, and `mix` is `classics:3,explore:0` |
+| `/api/list` | `cat` or `area`, `offset`, `n` (≤60, default 24), and filters: `type`, `level`, `evergreen`, `sort`; with metadata also `dur`, `date`, `gems` |
+| `/api/search` | `q` (≤200 chars) and the same filters; `sort` defaults to `relevance`; at most 60 results |
 | `/api/video` | `vid`: the card, HN stats and comments |
-| `/api/related` | `vid`, `n` |
-| `/api/docs` | `vids`: cards for saved lists, in order |
-| `/api/suggest` | `q`: up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix) |
+| `/api/related` | `vid`, `n` (≤40, default 20) |
+| `/api/docs` | `vids` (≤200): cards for saved lists, in order; unknown or deleted ids are skipped |
+| `/api/suggest` | `q` (≤200 chars; a single character returns nothing): up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix); cached |
 | `/api/oembed` | `vid`: title and channel of any YouTube video, for My videos (via YouTube's public oEmbed; rate limited) |
 | `/api/browse`, `/api/stats`, `/api/config` | none |
 
@@ -176,12 +181,18 @@ src/
   related.js     "Up next"
   filters.js     list/search filters and sorts
   embedder.js    query embeddings with transformers.js (bge-small-en-v1.5, CLS pooling)
-  npy.js, rng.js, vec.js, lru.js, ratelimit.js, http.js
-scripts/         data:fetch and data:youtube
+  npy.js, rng.js, vec.js, ratelimit.js, http.js
+scripts/         build.js (esbuild + Tailwind), dev.js, fetch-data.sh, fetch-youtube-meta.js
 test/            unit, api and e2e tests, plus the fixture generator
 ```
 
-## Credits and licence
+## Licence
+
+Copyright © 2026 the Custom Tube authors. All rights reserved (see `LICENSE`). Third-party software
+and its licences are listed in `THIRD_PARTY_NOTICES.md`; the web client serves the notices for the
+code it bundles at `/static/licenses.txt` (linked from About).
+
+## Credits and data licence
 
 The video data comes from the [HackerTube](https://hackertube.org) data export (exported 2026-10-31),
 released under the [Open Data Commons Attribution License (ODC-By) v1.0](https://opendatacommons.org/licenses/by/1-0/),

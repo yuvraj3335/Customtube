@@ -15,7 +15,7 @@
   --text: #121212;
   --muted: #66665f;
   --line: #e8e8e4;
-  --accent: #e5482d;
+  --accent: #c93a20; /* 4.6:1 with white text */
   --accent-ink: #ffffff;
   --accent-soft: #fdebe7;
   --focus: #2f6fdb;
@@ -158,6 +158,12 @@
   .chip.removable span { @apply text-base leading-none text-muted; }
   .count { @apply ml-1.5 text-[13px] font-normal text-muted; }
   .chips.scroller { @apply flex-nowrap overflow-x-auto pb-1; scrollbar-width: none; }
+  /* topic pickers: on phones, the first 8 topics and a "More topics" button (shown last) */
+  .picker .more-topics { @apply hidden; }
+  @media (max-width: 639px) {
+    .picker .more-topics { display: inline-flex; }
+    .picker:not(.expanded) .chip[data-topic]:nth-of-type(n + 9) { display: none; }
+  }
 
   .filterbar { @apply mb-5 flex flex-wrap items-center gap-x-4 gap-y-2.5; }
   .filter { @apply inline-flex items-center gap-1.5 text-sm text-muted; }

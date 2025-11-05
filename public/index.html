@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f0f10" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/styles.css">
 <script type="module" src="/static/app.js"></script>
@@ -29,15 +29,15 @@
   </button>
 </header>
 <div class="shell">
-  <aside class="side">
+  <div class="side">
     <nav class="tabs" aria-label="Sections">
       <a href="/" data-nav="/"><i data-icon="home"></i><span>Home</span></a>
       <a href="/topics" data-nav="/topics"><i data-icon="topics"></i><span>Topics</span></a>
       <a href="/library" data-nav="/library"><i data-icon="library"></i><span>Library</span></a>
       <a href="/settings" data-nav="/settings"><i data-icon="sliders"></i><span>Customize</span></a>
     </nav>
-    <div class="side-extra" id="side-extra"></div>
-  </aside>
+    <div class="side-extra" id="side-extra" role="complementary" aria-label="Your lists and topics"></div>
+  </div>
   <main id="view" tabindex="-1"><p class="status">Loading…</p></main>
 </div>
 <div id="toast" role="status" aria-live="polite"></div>

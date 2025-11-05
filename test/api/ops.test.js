@@ -35,12 +35,30 @@ test('static files: precompressed, ETag, 304 when unchanged', async (t) => {
   });
   assert.equal(raw.headers['content-encoding'], 'gzip');
   const etag = raw.headers.etag;
-  assert.match(etag, /^"[\w-]{16}"$/);
+  assert.match(etag, /^"[\w-]{16}-gz"$/, 'the gzip body has its own ETag');
   const again = await fetch(`${base}/static/app.js`, { headers: { 'if-none-match': etag } });
   assert.equal(again.status, 304);
   assert.equal(again.headers.get('x-content-type-options'), 'nosniff');
   const changed = await fetch(`${base}/static/app.js`, { headers: { 'if-none-match': '"other"' } });
   assert.equal(changed.status, 200);
+  assert.equal((await fetch(`${base}/static/app.js`, { headers: { 'if-none-match': `"x", W/${etag}` } })).status, 304, 'lists and weak tags');
+  assert.equal((await fetch(`${base}/static/app.js`, { headers: { 'if-none-match': '*' } })).status, 304);
+});
+
+test('each deploy has a version: pages ask for versioned assets and the service worker names its cache after it', async (t) => {
+  const { base } = await boot(t);
+  const html = await (await fetch(`${base}/`)).text();
+  const v = /\/static\/app\.js\?v=([0-9a-f]{12})"/.exec(html)?.[1];
+  assert.ok(v, 'app.js is versioned');
+  assert.match(html, new RegExp(`/static/styles\\.css\\?v=${v}"`));
+  const sw = await (await fetch(`${base}/sw.js`)).text();
+  assert.match(sw, new RegExp(`const VERSION = '${v}'`));
+  assert.ok(!sw.includes('__VERSION__'));
+  const pinned = await fetch(`${base}/static/app.js?v=${v}`);
+  assert.match(pinned.headers.get('cache-control'), /immutable/);
+  const licences = await fetch(`${base}/static/licenses.txt`);
+  assert.equal(licences.status, 200);
+  assert.match(await licences.text(), /fuse\.js .*Apache-2\.0/);
 });
 
 test('related: one cache entry per video, sliced to n', async (t) => {
