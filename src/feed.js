@@ -17,7 +17,6 @@ import { canonical, monthIndex } from './data.js';
 import { rngFor, weightedOrder } from './rng.js';
 import { GEM_MAX_VIEWS } from './filters.js';
 import { allowedByCuration, defaultCuration, mixPattern } from './curation.js';
-import { dotRows } from './vec.js';
 
 export const FEED_LENGTH = 720;
 const PROFILE_CAP = 30; // most recent likes/dislikes used for "similar", "corec" and the soft dislike push-down
@@ -55,7 +54,6 @@ function profileVideos(ds, vids) {
  * @param {ReturnType<typeof defaultCuration>} [curation]
  */
 export function prepareFeed(ds, { likes = [], dislikes = [], seen = [] } = {}, curation = defaultCuration()) {
-  const { dim, emb } = ds;
   const liked = profileVideos(ds, likes);
   const disliked = profileVideos(ds, dislikes);
   const opened = profileVideos(ds, seen);
@@ -69,19 +67,26 @@ export function prepareFeed(ds, { likes = [], dislikes = [], seen = [] } = {}, c
   const dropDislikes = disliked.slice(-DROP_CAP).filter((d) => d.hasEmbedding);
   const recentDislikes = new Set(disliked.slice(-PROFILE_CAP));
   const dislikedChannels = new Set(disliked.map((d) => d.channel));
-  const penalty = new Float32Array(ds.videos.length).fill(1);
+  // Closest of the last 100 dislikes (a near-copy is dropped) and of the last 30 (pushes
+  // similar videos down), per video, from cached similarity rows.
+  const n = ds.videos.length;
+  const maxAll = new Float32Array(n).fill(-1);
+  const maxRecent = new Float32Array(n).fill(-1);
+  for (const d of dropDislikes) {
+    const row = ds.simRow(d.i);
+    const recent = recentDislikes.has(d);
+    for (const v of pool) {
+      const s = row[v.i];
+      if (s > maxAll[v.i]) maxAll[v.i] = s;
+      if (recent && s > maxRecent[v.i]) maxRecent[v.i] = s;
+    }
+  }
+  const penalty = new Float32Array(n).fill(1);
   for (const v of pool) {
     let p = dislikedChannels.has(v.channel) ? 0.5 : 1;
     if (dropDislikes.length && v.hasEmbedding) {
-      let max = -1; // closest of the last 100 dislikes: a near-copy is dropped
-      let maxRecent = -1; // closest of the last 30: pushes similar videos down
-      for (const d of dropDislikes) {
-        const sim = dotRows(emb, dim, v.i, d.i);
-        if (sim > max) max = sim;
-        if (sim > maxRecent && recentDislikes.has(d)) maxRecent = sim;
-      }
-      if (max >= DISLIKE_DROP) p = 0;
-      else if (maxRecent > 0.6) p *= 1 - (0.85 * (maxRecent - 0.6)) / (DISLIKE_DROP - 0.6);
+      if (maxAll[v.i] >= DISLIKE_DROP) p = 0;
+      else if (maxRecent[v.i] > 0.6) p *= 1 - (0.85 * (maxRecent[v.i] - 0.6)) / (DISLIKE_DROP - 0.6);
     }
     penalty[v.i] = p;
   }
@@ -90,20 +95,19 @@ export function prepareFeed(ds, { likes = [], dislikes = [], seen = [] } = {}, c
   let near = [];
   const withEmb = seeds.filter((l) => l.hasEmbedding);
   if (withEmb.length) {
-    const scored = [];
-    for (const v of pool) {
-      if (!v.hasEmbedding) continue;
-      let best = -1;
-      let from = null;
-      for (const l of withEmb) {
-        const sim = dotRows(emb, dim, v.i, l.i);
-        if (sim > best) {
-          best = sim;
-          from = l;
+    const best = new Float32Array(n).fill(-1);
+    const from = new Array(n);
+    for (const l of withEmb) {
+      const row = ds.simRow(l.i);
+      for (const v of pool) {
+        if (row[v.i] > best[v.i]) {
+          best[v.i] = row[v.i];
+          from[v.i] = l;
         }
       }
-      scored.push({ v, sim: best, from });
     }
+    const scored = [];
+    for (const v of pool) if (v.hasEmbedding) scored.push({ v, sim: best[v.i], from: from[v.i] });
     scored.sort((a, b) => b.sim - a.sim);
     near = scored.slice(0, 400);
   }

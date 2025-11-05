@@ -193,16 +193,24 @@ test('search: semantic, keyword fallback, weak flag, topic match and filters', (
 
   // whole words only, at any length
   const v = ds.byVid.get(vidOf(0, 2));
-  v.search.title = ' going google go somewhere ';
+  // retitle a video after load, keeping the word index in step
+  const retitle = (title) => {
+    v.search.title = title;
+    for (const w of title.trim().split(' ')) {
+      if (!ds.wordIndex.has(w)) ds.wordIndex.set(w, []);
+      if (!ds.wordIndex.get(w).includes(v.i)) ds.wordIndex.get(w).push(v.i);
+    }
+  };
+  retitle(' going google go somewhere ');
   const go = searchVideos(ds, { q: 'go', qvec: null, filters: { sort: 'relevance' } });
   assert.deepEqual(go.results.map((r) => r.vid), [vidOf(0, 2)]);
-  v.search.title = ' going google demoscene ';
+  retitle(' going google demoscene ');
   assert.equal(searchVideos(ds, { q: 'go', qvec: null, filters: { sort: 'relevance' } }).results.length, 0);
   assert.equal(searchVideos(ds, { q: 'goog', qvec: null, filters: { sort: 'relevance' } }).results.length, 0, 'no prefix matches');
   // singular and plural forms match each other
-  v.search.title = ' how a transistor works ';
+  retitle(' how a transistor works ');
   assert.equal(searchVideos(ds, { q: 'transistors', qvec: null, filters: { sort: 'relevance' } }).results[0].vid, vidOf(0, 2));
-  v.search.title = ' many demos ';
+  retitle(' many demos ');
   assert.equal(searchVideos(ds, { q: 'demo', qvec: null, filters: { sort: 'relevance' } }).results[0].vid, vidOf(0, 2));
 });
 

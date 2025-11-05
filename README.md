@@ -64,8 +64,22 @@ is ready, search uses keywords only.
 | `CUSTOMTUBE_YOUTUBE_META` | `data/youtube_meta.jsonl` | Optional YouTube metadata (below) |
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
-| `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` |
+| `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` (checked at startup) |
+| `MAX_CONNECTIONS` | `2000` | Open connections the server accepts at once |
 | `TRUST_PROXY` | `0` | How many proxies of yours sit in front of the server (e.g. `1` for one reverse proxy, `2` for a CDN plus a load balancer). Rate limits then key on the client address those proxies report; anything a client adds further left is ignored. Only set it when the server can't be reached except through those proxies: a client that reaches it directly could forge the header and dodge every limit |
+
+### Running it for real
+
+- `npm start` caps the V8 heap at 384 MB; the process settles around 400–500 MB RSS under load, so
+  a 1 GB box is enough. Put it behind nginx or Caddy (TLS, HTTP/2) and set `TRUST_PROXY=1`.
+- `SIGTERM`/`SIGINT` stop accepting connections, let in-flight requests finish, and force-close
+  after 10 seconds.
+- `/healthz` reports `degraded: true` while search is keyword-only because the model couldn't load;
+  the server retries loading it with backoff (30 s, doubling, up to every 10 minutes).
+- Rate limits: per client for every API route, plus server-wide budgets for the two expensive
+  things, building a new profile's feed (about 30% of one core at most) and searching (30 per
+  second). Over budget the server answers 503 with `Retry-After`.
+- Static files are compressed once at startup and served with ETags (304 when unchanged).
 
 ### YouTube metadata (for Shorts, lengths, dates and view counts)
 

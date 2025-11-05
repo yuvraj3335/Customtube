@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { LRUCache } from 'lru-cache';
 import { readNpyMatrix } from './npy.js';
 import { dotRows, normalizeInPlace } from './vec.js';
 
@@ -44,7 +45,14 @@ function readJsonl(file, { skipBad = false } = {}) {
   const out = [];
   let bad = 0;
   let lineNo = 0;
-  for (const line of readText(file).split('\n')) {
+  const text = readText(file);
+  // Walk the lines in place rather than split(): the comments file is ~35 MB, and an array of
+  // every line would double the memory needed while loading.
+  for (let start = 0; start <= text.length; ) {
+    let end = text.indexOf('\n', start);
+    if (end === -1) end = text.length;
+    const line = text.slice(start, end);
+    start = end + 1;
     lineNo++;
     if (!line.trim()) continue;
     try {
@@ -325,6 +333,19 @@ export function loadDataset({ dataDir, metaFile = null }) {
     if (group.length > 1 && group.length < 500) markDuplicates(group, (k, v) => contains(k, v) && similar(k, v));
   }
 
+  // Word -> indexes of videos whose title, topics, channel or summary contain it, so a keyword
+  // search only scores the videos that can match.
+  const wordIndex = new Map();
+  for (const v of videos) {
+    const words = new Set(`${v.search.title}${v.search.topics}${v.search.channel}${v.search.summary}`.split(' '));
+    for (const w of words) {
+      if (!w) continue;
+      let list = wordIndex.get(w);
+      if (!list) wordIndex.set(w, (list = []));
+      list.push(v.i);
+    }
+  }
+
   // `visible`: shown anywhere. The Home feed narrows this further (see src/curation.js).
   for (const v of videos) v.visible = !v.dupOf && !v.gone;
 
@@ -385,6 +406,8 @@ export function loadDataset({ dataDir, metaFile = null }) {
     hasMeta: Boolean(meta),
     maxMonth,
     warnings,
+    simRow: makeSimRows(emb, dim, videos.length),
+    wordIndex,
     stats: {
       videos: visible.length,
       total_videos: videos.length,
@@ -399,6 +422,29 @@ export function loadDataset({ dataDir, metaFile = null }) {
       latest_month: maxMonth,
       has_youtube_metadata: Boolean(meta),
     },
+  };
+}
+
+/**
+ * simRow(i): the cosine similarity of video i to every video, as a Float32Array indexed like
+ * `videos`. One row costs ~2 ms; rows are cached (26 KB each, 1,500 rows ~40 MB), so a video
+ * that many profiles like or dislike is computed once.
+ */
+function makeSimRows(emb, dim, n) {
+  const cache = new LRUCache({ max: 1500 });
+  return (i) => {
+    let row = cache.get(i);
+    if (row) return row;
+    row = new Float32Array(n);
+    const a = i * dim;
+    for (let j = 0; j < n; j++) {
+      const b = j * dim;
+      let s = 0;
+      for (let k = 0; k < dim; k++) s += emb[a + k] * emb[b + k];
+      row[j] = s;
+    }
+    cache.set(i, row);
+    return row;
   };
 }
 

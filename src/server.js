@@ -2,6 +2,8 @@
 // app shell for every client route (with per-page <title>/<meta> so shared links preview).
 
 import http from 'node:http';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,6 +19,7 @@ import { CONTENT_TYPES, DATES, DURATIONS, FILTER_KEYS, LEVELS, parseFilters, mat
 import { DEFAULT_MIX, FORMATS, LONG_MIN_SECONDS, MIX_SOURCES, SHORT_MAX_SECONDS, curationKey, formatOf, parseCuration } from './curation.js';
 import {
   HttpError,
+  SECURITY_HEADERS,
   assertKnownParams,
   assertNonEmpty,
   badRequest,
@@ -177,7 +180,10 @@ function loadStatic(publicDir) {
     const type = STATIC_TYPES[path.extname(name)];
     if (!type || name === 'index.html') continue;
     const body = readFileSync(path.join(publicDir, name));
-    files.set(ROOT_FILES.has(name) ? `/${name}` : `/static/${name}`, { body, type, root: ROOT_FILES.has(name) });
+    // Compressed once here rather than on every request, with an ETag for 304 answers.
+    const gz = gzipSync(body, { level: 9 });
+    const etag = `"${createHash('sha1').update(body).digest('base64url').slice(0, 16)}"`;
+    files.set(ROOT_FILES.has(name) ? `/${name}` : `/static/${name}`, { body, gz: gz.length < body.length ? gz : null, etag, type, root: ROOT_FILES.has(name) });
   }
   return files;
 }
@@ -197,7 +203,10 @@ async function readJsonBody(req) {
   try {
     for await (const chunk of req) {
       size += chunk.length;
-      if (size > MAX_BODY) throw new HttpError(413, `request body is larger than ${MAX_BODY} bytes`);
+      if (size > MAX_BODY) {
+        req.resume(); // drain the rest so the client can read the 413
+        throw new HttpError(413, `request body is larger than ${MAX_BODY} bytes`, { connection: 'close' });
+      }
       chunks.push(chunk);
     }
   } catch (err) {
@@ -276,15 +285,20 @@ export function createApp({
   // Building a new profile's feed costs ~140 ms; a cached profile with a new seed ~2 ms. So new
   // profiles get a tighter budget, per client and for the whole server.
   prepLimiter = createRateLimiter({ capacity: 10, refillPerSecond: 0.5 }),
-  prepGlobalLimiter = createRateLimiter({ capacity: 40, refillPerSecond: 4 }),
+  // Building new profiles may use at most ~30% of one core, measured in real CPU milliseconds.
+  prepCpuBudget = createRateLimiter({ capacity: 1000, refillPerSecond: 300 }),
+  // Searches across all clients (each costs ~5-15 ms).
+  searchGlobalLimiter = createRateLimiter({ capacity: 60, refillPerSecond: 30 }),
   // Everything else in the API is cheap, but not free: a generous per-client budget.
   apiLimiter = createRateLimiter({ capacity: 240, refillPerSecond: 40 }),
   fetchImpl = globalThis.fetch,
+  maxConnections = 2000,
   log = console,
   now = () => Date.now(),
 }) {
   const oembedCache = new LRUCache({ max: 2000 });
   const relatedCache = new LRUCache({ max: 2000 });
+  const searchCache = new LRUCache({ max: 500 });
   const staticFiles = loadStatic(publicDir);
   const shell = readFileSync(path.join(publicDir, 'index.html'), 'utf8');
   if (!shell.includes('<!--HEAD-->')) throw new Error('public/index.html must contain <!--HEAD-->');
@@ -306,15 +320,16 @@ export function createApp({
     return req.socket.remoteAddress || 'unknown';
   };
 
-  // Up next scans every video's embedding (~5 ms), and the answer never changes.
+  // Up next scans every video's embedding (~5 ms), and the answer never changes. One entry per
+  // video, at the largest size; smaller requests are a slice.
+  const RELATED_MAX = 40;
   function cachedRelated(vid, n) {
-    const key = `${vid}:${n}`;
-    let out = relatedCache.get(key);
+    let out = relatedCache.get(vid);
     if (!out) {
-      out = relatedFor(ds, vid, n);
-      relatedCache.set(key, out);
+      out = relatedFor(ds, vid, RELATED_MAX);
+      relatedCache.set(vid, out);
     }
-    return out;
+    return out.slice(0, n);
   }
 
   function getFeed(req, profile, curation) {
@@ -326,9 +341,14 @@ export function createApp({
     let prepared = prepCache.get(prepKey);
     if (!prepared) {
       const mine = prepLimiter.take(clientKey(req));
-      const all = mine.ok ? prepGlobalLimiter.take('*') : mine;
-      if (!all.ok) throw new HttpError(429, 'too many new feed profiles, try again shortly', { 'retry-after': String(all.retryAfter) });
+      if (!mine.ok) throw new HttpError(429, 'too many new feed profiles, try again shortly', { 'retry-after': String(mine.retryAfter) });
+      // Server-wide: refuse while the CPU budget for new profiles is spent, then charge what
+      // this one really took.
+      const cpu = prepCpuBudget.take('*', 50);
+      if (!cpu.ok) throw new HttpError(503, 'busy building feeds, try again shortly', { 'retry-after': String(cpu.retryAfter) });
+      const t0 = performance.now();
       prepared = prepareFeed(ds, profile, curation);
+      prepCpuBudget.charge('*', Math.max(0, performance.now() - t0 - 50));
       prepCache.set(prepKey, prepared);
     }
     const feed = buildFeed(ds, profile, curation, prepared);
@@ -550,6 +570,11 @@ export function createApp({
       if (!limit.ok) {
         throw new HttpError(429, 'too many searches, try again shortly', { 'retry-after': String(limit.retryAfter) });
       }
+      const cacheKey = JSON.stringify([q.toLowerCase(), filters, embedder.status() === 'ready']);
+      const hit = searchCache.get(cacheKey);
+      if (hit) return sendJson(req, res, 200, hit);
+      const all = searchGlobalLimiter.take('*');
+      if (!all.ok) throw new HttpError(503, 'lots of searches right now, try again shortly', { 'retry-after': String(all.retryAfter) });
       let qvec = null;
       try {
         qvec = await embedder.embed(q);
@@ -562,11 +587,10 @@ export function createApp({
         qvec = null;
       }
       const out = searchVideos(ds, { q, qvec, filters, nowMs: now() });
-      sendJson(req, res, 200, {
-        mode: out.mode,
-        weak: out.weak,
-        items: out.results.map((r) => cardDto(ds.byVid.get(r.vid), { via: r.via })),
-      });
+      const body = { mode: out.mode, weak: out.weak, items: out.results.map((r) => cardDto(ds.byVid.get(r.vid), { via: r.via })) };
+      // "Past year" moves with the clock, so those results aren't cached.
+      if (!filters.date) searchCache.set(cacheKey, body);
+      sendJson(req, res, 200, body);
     },
   };
 
@@ -584,7 +608,11 @@ export function createApp({
       return sendJson(req, res, 405, { error: 'method not allowed' }, { allow: allowed.join(', ') });
     }
 
-    if (pathname === '/healthz') return sendJson(req, res, 200, { ok: true, videos: ds.stats.videos, embedder: embedder.status() });
+    if (pathname === '/healthz') {
+      // "degraded": serving, but search is keyword-only because the model isn't available.
+      const status = embedder.status();
+      return sendJson(req, res, 200, { ok: true, degraded: status === 'failed', videos: ds.stats.videos, embedder: status });
+    }
 
     if (pathname.startsWith('/api/')) {
       const route = Object.hasOwn(routes, pathname) ? routes[pathname] : null;
@@ -605,8 +633,17 @@ export function createApp({
     const file = staticFiles.get(pathname);
     if (file) {
       // The service worker must be re-checked on every load, or app updates never reach users.
-      const cache = file.root ? 'no-cache' : 'public, max-age=300';
-      return send(req, res, 200, file.body, { 'content-type': file.type, 'cache-control': cache });
+      const headers = { ...SECURITY_HEADERS, 'content-type': file.type, 'cache-control': file.root ? 'no-cache' : 'public, max-age=300', etag: file.etag, vary: 'Accept-Encoding' };
+      if (req.headers['if-none-match'] === file.etag) {
+        res.writeHead(304, headers);
+        return res.end();
+      }
+      const gzip = file.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+      const payload = gzip ? file.gz : file.body;
+      if (gzip) headers['content-encoding'] = 'gzip';
+      headers['content-length'] = payload.length;
+      res.writeHead(200, headers);
+      return res.end(req.method === 'HEAD' ? undefined : payload);
     }
 
     const page = appRoute(ds, pathname);
@@ -628,7 +665,9 @@ export function createApp({
     });
   }
 
-  const server = http.createServer((req, res) => {
+  // Timeouts are checked every 2 s (Node's default 30 s made a 10 s header timeout fire at ~32 s).
+  const server = http.createServer({ connectionsCheckingInterval: 2000 }, (req, res) => {
+    if (server.closing) res.setHeader('connection', 'close');
     handle(req, res).catch((err) => {
       log.error?.(`unhandled: ${err.stack || err.message}`);
       if (!res.headersSent) sendJson(req, res, 500, { error: 'internal error' });
@@ -637,10 +676,36 @@ export function createApp({
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxConnections = maxConnections;
+
+  /** Stop taking connections, let in-flight requests finish, force-close after `graceMs`. */
+  server.shutdown = (graceMs = 10_000) =>
+    new Promise((resolve) => {
+      server.closing = true;
+      const force = setTimeout(() => server.closeAllConnections(), graceMs);
+      force.unref();
+      server.close(() => {
+        clearTimeout(force);
+        resolve();
+      });
+      server.closeIdleConnections();
+    });
   return { server, handle };
 }
 
 // ---------- entry point ----------
+
+function parsePublicUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`PUBLIC_URL must be a full URL like https://tube.example.com (got ${JSON.stringify(value)})`);
+  }
+  if (!/^https?:$/.test(url.protocol) || url.search || url.hash) throw new Error('PUBLIC_URL must be an http(s) origin with no query or fragment');
+  return url.origin + url.pathname.replace(/\/+$/, '');
+}
 
 export function readConfig(env = process.env) {
   const dataDir = path.resolve(env.CUSTOMTUBE_DATA_DIR || path.join(ROOT, 'data/raw/hackertube-data'));
@@ -652,7 +717,8 @@ export function readConfig(env = process.env) {
     port,
     embedder: !/^(off|0|false|no)$/i.test(env.CUSTOMTUBE_EMBEDDER ?? ''),
     cacheDir: path.resolve(env.CUSTOMTUBE_MODEL_CACHE || path.join(ROOT, '.cache/models')),
-    publicUrl: env.PUBLIC_URL || null,
+    publicUrl: env.PUBLIC_URL ? parsePublicUrl(env.PUBLIC_URL) : null,
+    maxConnections: parseIntParam(env.MAX_CONNECTIONS ?? '', 'MAX_CONNECTIONS', { min: 1, max: 1_000_000, def: 2000 }),
     // TRUST_PROXY=N: N proxies of ours sit in front of the server (1 = a single reverse proxy).
     trustProxy: parseIntParam(env.TRUST_PROXY ?? '', 'TRUST_PROXY', { min: 0, max: 10, def: 0 }),
   };
@@ -670,14 +736,24 @@ async function main() {
   for (const w of ds.warnings) console.warn(`data warning: ${w}`);
   const embedder = createEmbedder({ cacheDir: cfg.cacheDir, enabled: cfg.embedder });
   embedder.start();
-  const { server } = createApp({ ds, embedder, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy });
+  const { server } = createApp({ ds, embedder, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy, maxConnections: cfg.maxConnections });
+  server.on('error', (err) => {
+    console.error(err.code === 'EADDRINUSE' ? `Port ${cfg.port} is already in use. Set PORT to a free port.` : `Could not listen on ${cfg.host}:${cfg.port}: ${err.message}`);
+    process.exit(1);
+  });
   server.listen(cfg.port, cfg.host, () => {
     const addr = server.address();
     console.info(`Custom Tube listening on http://${addr.address}:${addr.port}`);
   });
-  const stop = () => server.close(() => process.exit(0));
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
+  let stopping = false;
+  const stop = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    console.info(`${signal}: finishing open requests, then exiting`);
+    server.shutdown(10_000).then(() => process.exit(0));
+  };
+  process.on('SIGINT', () => stop('SIGINT'));
+  process.on('SIGTERM', () => stop('SIGTERM'));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

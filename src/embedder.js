@@ -11,10 +11,11 @@ import { normalizeInPlace } from './vec.js';
 
 export const MODEL_ID = 'Xenova/bge-small-en-v1.5';
 
-export function createEmbedder({ cacheDir, enabled = true, log = console }) {
+export function createEmbedder({ cacheDir, enabled = true, log = console, retryMs = 30_000, maxRetryMs = 10 * 60_000 }) {
   let state = enabled ? 'idle' : 'off';
   let extractor = null;
   let loading = null;
+  let nextRetry = retryMs;
   let queue = Promise.resolve();
   const cache = new LRUCache({ max: 500 });
 
@@ -31,7 +32,16 @@ export function createEmbedder({ cacheDir, enabled = true, log = console }) {
         log.info?.(`embedder ready (${MODEL_ID}, ${Date.now() - t0} ms)`);
       } catch (err) {
         state = 'failed';
-        log.error?.(`embedder failed to load, search falls back to keywords: ${err.message}`);
+        log.error?.(`embedder failed to load, search falls back to keywords; retrying in ${Math.round(nextRetry / 1000)} s: ${err.message}`);
+        // A failed first download (no network at boot) shouldn't mean keyword-only until a
+        // restart: try again, backing off up to every 10 minutes.
+        const timer = setTimeout(() => {
+          state = 'idle';
+          loading = null;
+          start();
+        }, nextRetry);
+        timer.unref?.();
+        nextRetry = Math.min(nextRetry * 2, maxRetryMs);
       }
     })();
     return loading;

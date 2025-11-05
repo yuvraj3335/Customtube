@@ -323,7 +323,7 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
 
   test('saved settings the server does not know are left out of the request, kept, and reported', async () => {
     await page.evaluate(() =>
-      localStorage.setItem('customtube:prefs', JSON.stringify({ types: ['talk', 'hologram'], followTopics: ['retired-topic'], muteTopics: ['retired-topic'] })),
+      localStorage.setItem('customtube:prefs', JSON.stringify({ types: ['talk', 'hologram'], followTopics: ['retired-topic'], muteTopics: ['another-retired-topic'] })),
     );
     const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
     await page.goto(base + '/');
@@ -335,11 +335,11 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.equal(sent.mute_topics, undefined);
     await page.waitForSelector('.card');
     await page.waitForSelector('#toast.on');
-    // "hologram" and the followed retired topic; the muted copy was already dropped as a follow/mute clash
-    assert.match(await page.textContent('#toast'), /2 saved settings not used/);
+    assert.match(await page.textContent('#toast'), /3 saved settings not used/);
     const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:prefs')));
     assert.deepEqual(saved.types, ['talk', 'hologram']);
     assert.deepEqual(saved.followTopics, ['retired-topic']);
+    assert.deepEqual(saved.muteTopics, ['another-retired-topic']);
     await page.evaluate(() => localStorage.removeItem('customtube:prefs'));
   });
 
@@ -470,6 +470,9 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.click('.menu-item:has-text("Not interested")');
     await page.click('.toast-undo');
     const dislikes = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:dislikes')));
+    const feedReq = page.waitForResponse((r) => r.url().includes('/api/feed'));
+    await page.goto(base + '/');
+    assert.ok((await feedReq).request().postDataJSON().dislike.includes(dv), 'dislikes are sent with the feed request');
     assert.ok(dislikes.includes(dv) && dislikes.includes(vid), 'earlier dislikes survive Undo');
     await page.evaluate(() => localStorage.removeItem('customtube:dislikes'));
     await page.waitForTimeout(350); // the toast fades out
@@ -487,30 +490,30 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     for (let i = errors.length - 1; i >= 0; i--) if (/status of 500 .*\/api\/feed$/.test(errors[i])) errors.splice(i, 1);
   });
 
-  test('two tabs: a change in one is not overwritten by the other', async () => {
-    const other = await page.context().newPage();
-    await other.goto(base + '/library');
+  test('two tabs: a change in one reaches the other without a reload, and is not overwritten', async () => {
     await page.goto(base + '/');
-    await page.waitForSelector('.card');
+    await page.waitForSelector('.home .grid .card');
     const [a, b] = await page.$$eval('.home .grid .card', (els) => els.slice(0, 2).map((e) => e.dataset.vid));
-    await page.evaluate(() => localStorage.setItem('customtube:likes', '[]'));
-    await other.reload();
+    await page.evaluate(() => {
+      localStorage.setItem('customtube:likes', '[]');
+      localStorage.setItem('customtube:later', '[]');
+    });
+    const other = await page.context().newPage();
+    await other.goto(base + '/library'); // opened once, then never reloaded
+    await other.waitForSelector('.shelf');
+    // tab 1 likes a video: tab 2 hears about it through the storage event
     await page.locator(`.home .grid .card[data-vid="${a}"] .card-link`).first().click();
     await page.click('#like');
-    // the other tab now saves something else; it must not drop the like
-    await other.evaluate((v) => document.querySelector(`[data-later="${v}"]`) ?? null, b);
-    await other.goto(base + '/history');
-    await other.evaluate(() => new Promise((r) => setTimeout(r, 100)));
-    await other.keyboard.press('Escape');
+    await other.waitForFunction((v) => document.querySelector('.shelf') && JSON.parse(localStorage.getItem('customtube:likes')).includes(v), a);
+    // tab 2 now saves something; its write must keep tab 1's like
     await other.evaluate((v) => {
-      // toggle Watch later from the other tab through the app's own handler
       const btn = document.createElement('button');
       btn.dataset.later = v;
       document.body.append(btn);
       btn.click();
     }, b);
     const likes = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:likes')));
-    assert.ok(likes.includes(a), 'the like from the first tab survives');
+    assert.ok(likes.includes(a), 'the like from the first tab survives the second tab\'s write');
     assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:later')))).includes(b));
     await other.close();
   });
@@ -605,8 +608,9 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     const libr = page.waitForResponse((r) => r.url().includes('/api/suggest?q=libr'));
     await page.keyboard.type('libr');
     await libr;
-    await page.waitForSelector('.palette-item:has-text("Library")');
-    await page.click('.palette-item:has-text("Library")');
+    // the "Library" page command, not a video whose title mentions a library
+    const command = page.locator('.palette-item:not(:has(img))').filter({ has: page.locator('.label', { hasText: /^Library$/ }) });
+    await command.click();
     await page.waitForURL('**/library');
   });
 

@@ -8,7 +8,7 @@
     "node": "^22.23.4 || >=24.22.1"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --max-old-space-size=384 src/server.js",
     "dev": "node scripts/build.js --watch & node --watch src/server.js",
     "data:fetch": "sh scripts/fetch-data.sh",
     "data:youtube": "node scripts/fetch-youtube-meta.js",

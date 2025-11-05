@@ -120,13 +120,18 @@ export function searchVideos(ds, { q, qvec, filters, limit = 60, nowMs = Date.no
     if (nameTokens.length && nameTokens.every((t) => tokens.includes(t))) topics.set(cat.id, 1);
   }
 
+  // Only videos containing at least one form of a query word can have a keyword score.
+  const candidates = new Set();
+  for (const f of forms) for (const w of f) for (const i of ds.wordIndex?.get(w.trim()) ?? []) candidates.add(i);
+  const noKeyword = { score: 0, full: false };
+
   const hits = [];
   let bestSim = -1;
   let bestKeyword = 0;
   let anyFull = false;
-  for (const v of ds.videos) {
+  for (const v of qvec ? ds.videos : [...candidates].map((i) => ds.videos[i])) {
     if (!v.visible || !matchesFilters(v, filters, nowMs)) continue;
-    const { score: kw, full } = keywordScore(v, tokens, forms, phrase);
+    const { score: kw, full } = candidates.has(v.i) ? keywordScore(v, tokens, forms, phrase) : noKeyword;
     const sim = qvec && v.hasEmbedding ? dotRowVec(ds.emb, ds.dim, v.i, qvec) : null;
     if (sim === null && kw === 0) continue;
     const topic = v.categories.find((c) => topics.has(c.id));
