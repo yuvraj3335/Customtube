@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadDataset, canonical } from './data.js';
 import { buildFeed, prepareFeed } from './feed.js';
 import { relatedFor } from './related.js';
-import { searchVideos } from './search.js';
+import { searchVideos, suggest } from './search.js';
 import { searchable } from './data.js';
 import { createEmbedder } from './embedder.js';
 import { createRateLimiter } from './ratelimit.js';
@@ -39,6 +39,7 @@ const STATIC_TYPES = {
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.webmanifest': 'application/manifest+json',
   '.html': 'text/html; charset=utf-8',
 };
 
@@ -166,12 +167,17 @@ function appRoute(ds, pathname) {
   return fixed[pathname] ? plain(fixed[pathname]) : null;
 }
 
+// Served from the site root rather than /static/: a service worker only controls pages under
+// its own path, and browsers look for the manifest by its link.
+const ROOT_FILES = new Set(['sw.js', 'manifest.webmanifest']);
+
 function loadStatic(publicDir) {
   const files = new Map();
   for (const name of readdirSync(publicDir)) {
     const type = STATIC_TYPES[path.extname(name)];
     if (!type || name === 'index.html') continue;
-    files.set(`/static/${name}`, { body: readFileSync(path.join(publicDir, name)), type });
+    const body = readFileSync(path.join(publicDir, name));
+    files.set(ROOT_FILES.has(name) ? `/${name}` : `/static/${name}`, { body, type, root: ROOT_FILES.has(name) });
   }
   return files;
 }
@@ -513,6 +519,15 @@ export function createApp({
       });
     },
 
+    '/api/suggest': (req, res, params) => {
+      assertKnownParams(params, ['q']);
+      const q = (params.get('q') ?? '').trim();
+      if (!q) throw badRequest('"q" is required');
+      if (q.length > MAX_QUERY || searchable(q).length > MAX_QUERY * 2) throw badRequest(`"q" must be at most ${MAX_QUERY} characters`);
+      const out = suggest(ds, q);
+      sendJson(req, res, 200, { videos: out.videos.map((vid) => cardDto(ds.byVid.get(vid))), topics: out.topics });
+    },
+
     '/api/docs': (req, res, params) => {
       assertKnownParams(params, ['vids']);
       const vids = parseVidList(params.get('vids'), 'vids', MAX_PROFILE_IDS);
@@ -588,7 +603,11 @@ export function createApp({
     }
 
     const file = staticFiles.get(pathname);
-    if (file) return send(req, res, 200, file.body, { 'content-type': file.type, 'cache-control': 'public, max-age=300' });
+    if (file) {
+      // The service worker must be re-checked on every load, or app updates never reach users.
+      const cache = file.root ? 'no-cache' : 'public, max-age=300';
+      return send(req, res, 200, file.body, { 'content-type': file.type, 'cache-control': cache });
+    }
 
     const page = appRoute(ds, pathname);
     if (!page) {

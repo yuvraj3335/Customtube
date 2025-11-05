@@ -1,0 +1,19 @@
+{
+  "name": "Custom Tube",
+  "short_name": "Custom Tube",
+  "description": "A YouTube feed you curate: the talks and videos Hacker News recommends, shaped by what you choose.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f0f10",
+  "theme_color": "#e5482d",
+  "categories": ["entertainment", "education"],
+  "icons": [
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Library", "url": "/library" },
+    { "name": "Customize your feed", "url": "/settings" }
+  ]
+}

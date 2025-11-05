@@ -25,7 +25,7 @@ const rules = {
 };
 
 export default [
-  { ignores: ['node_modules/**', 'data/**', '.cache/**', 'test-results/**'] },
+  { ignores: ['node_modules/**', 'data/**', '.cache/**', 'test-results/**', 'public/app.js', 'public/styles.css'] },
   {
     files: ['src/**/*.js', 'scripts/**/*.js', 'test/**/*.js', 'eslint.config.js'],
     languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: globals.node },
@@ -37,7 +37,7 @@ export default [
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
   {
-    files: ['public/**/*.js'],
+    files: ['client/**/*.js', 'public/**/*.js'],
     languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: globals.browser },
     rules,
   },

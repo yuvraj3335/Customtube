@@ -4,6 +4,13 @@ A YouTube front end where you decide what your feed shows. It starts from the vi
 recommended for nearly 20 years (6,454 videos, 39,834 labeled HN comments, 150 topics), and you add,
 filter and mix from there.
 
+- **Watch in the app.** Videos remember where you stopped (Continue watching, progress bars, "Resume
+  at 12:34"), the next one autoplays after a 5-second countdown you can cancel, and lists play in
+  order. Share any video with one click.
+- **Quick search** (⌘K / Ctrl+K): videos and topics as you type, plus every page and action.
+- **First visit:** pick a few topics and the first feed is already yours. A **Following** tab shows
+  only the topics you follow.
+- **Installable** as an app (desktop and phone), and its screens open offline.
 - **Home** is a feed made from several sources: HN classics, recent favourites, topics you haven't
   explored, videos similar to your likes, what the same HN people also recommended, topics you follow,
   hidden gems, and videos you added yourself. Hover a card to see why it's there.
@@ -40,8 +47,10 @@ Needs Node 22.23.4+ (or 24.22.1+). `nvm use` picks the version from `.nvmrc`.
 ```bash
 npm install
 npm run data:fetch      # downloads the HackerTube data export (~18 MB) into data/raw/
-npm start               # http://127.0.0.1:8080
+npm start               # builds the client, then serves http://127.0.0.1:8080
 ```
+
+`npm run dev` rebuilds the client and restarts the server as you edit.
 
 On first start the search model (~34 MB) downloads from Hugging Face into `.cache/models/`. Until it
 is ready, search uses keywords only.
@@ -118,6 +127,7 @@ All endpoints answer `GET` with JSON and reject unknown, invalid or empty parame
 | `/api/video` | `vid`: the card, HN stats and comments |
 | `/api/related` | `vid`, `n` |
 | `/api/docs` | `vids`: cards for saved lists, in order |
+| `/api/suggest` | `q`: up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix) |
 | `/api/oembed` | `vid`: title and channel of any YouTube video, for My videos (via YouTube's public oEmbed; rate limited) |
 | `/api/browse`, `/api/stats`, `/api/config` | none |
 
@@ -134,7 +144,15 @@ The browser tests use the real data and the real model when `data/raw/hackertube
 the fixture otherwise. They need Google Chrome installed, or `CHROME_PATH` set to a Chromium-family
 browser. Every request that would leave localhost (thumbnails, YouTube) is answered locally.
 
+The client is built from `client/` with **esbuild** (bundling) and **Tailwind CSS v4** (styles) into
+`public/app.js` and `public/styles.css`; `npm start` and the test scripts build it first. It uses
+**Lucide** for icons, **Floating UI** to place menus, and **Fuse.js** for fuzzy matching in quick
+search. The YouTube player is driven through YouTube's documented iframe `postMessage` protocol, so
+no third-party script runs on the page.
+
 ```
+client/          app.js (pages, router, state), player.js, palette.js, icons.js, styles.css (Tailwind)
+public/          index.html, sw.js, manifest.webmanifest, icons; built app.js and styles.css
 src/
   server.js      HTTP server: API routes, app shell with per-page <meta>, static files
   data.js        loads the export, re-orders embeddings, finds duplicate uploads, topic centroids
@@ -145,7 +163,6 @@ src/
   filters.js     list/search filters and sorts
   embedder.js    query embeddings with transformers.js (bge-small-en-v1.5, CLS pooling)
   npy.js, rng.js, vec.js, lru.js, ratelimit.js, http.js
-public/          the client (no build step): index.html, app.js, styles.css
 scripts/         data:fetch and data:youtube
 test/            unit, api and e2e tests, plus the fixture generator
 ```

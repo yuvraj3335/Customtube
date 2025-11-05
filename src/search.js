@@ -166,3 +166,35 @@ export function searchVideos(ds, { q, qvec, filters, limit = 60, nowMs = Date.no
     })),
   };
 }
+
+/**
+ * As-you-type suggestions: every word but the last must appear whole in a video's title, tags
+ * or channel, and the last one may be a prefix ("distri" -> "distributed"). Keyword-only, so it
+ * is fast enough to run on each keystroke. Returns videos and topics.
+ */
+export function suggest(ds, q, { videos = 6, topics = 4 } = {}) {
+  const words = searchable(q).trim().split(' ').filter(Boolean).slice(0, MAX_TOKENS);
+  if (!words.length || words.join('').length < 2) return { videos: [], topics: [] };
+  const last = words[words.length - 1];
+  const rest = words.slice(0, -1).filter((w) => !STOPWORDS.has(w));
+  const fieldHas = (field) => rest.every((w) => field.includes(` ${w} `)) && field.includes(` ${last}`);
+  const hits = [];
+  for (const v of ds.videos) {
+    if (!v.visible) continue;
+    const s = v.search;
+    const inTitle = fieldHas(s.title);
+    if (!inTitle && !fieldHas(` ${s.topics.trim()} ${s.channel.trim()} `)) continue;
+    hits.push({ v, rank: (inTitle ? 2 : 0) + Math.log1p(v.score) });
+  }
+  hits.sort((a, b) => b.rank - a.rank);
+  const cats = [];
+  for (const c of ds.categoryById.values()) {
+    const name = searchable(c.name);
+    if (fieldHas(name)) cats.push(c);
+  }
+  cats.sort((a, b) => b.count - a.count);
+  return {
+    videos: hits.slice(0, videos).map((h) => h.v.vid),
+    topics: cats.slice(0, topics).map((c) => ({ id: c.id, name: c.name, count: c.count })),
+  };
+}

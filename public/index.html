@@ -2,36 +2,48 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!--HEAD-->
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f0f10" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/styles.css">
 <script type="module" src="/static/app.js"></script>
 </head>
 <body>
 <a class="skip" href="#view">Skip to content</a>
 <header class="top">
-  <a class="brand" href="/" aria-label="Custom Tube home"><span class="brand-mark">Custom</span><span class="brand-word">Tube</span></a>
+  <a class="brand" href="/" aria-label="Custom Tube home">
+    <svg class="brand-logo" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="brand-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6a3d"/><stop offset="1" stop-color="#d4321b"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#brand-g)"/><path d="M13 10v12l10-6z" fill="#fff"/></svg>
+    <span class="brand-word">Custom<span class="brand-mark">Tube</span></span>
+  </a>
   <form id="search" class="search" role="search">
+    <i data-icon="search" class="search-icon"></i>
     <input id="q" name="q" type="search" placeholder="Search videos" autocomplete="off" maxlength="200" aria-label="Search videos">
-    <button type="submit" class="search-btn" aria-label="Search">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-    </button>
+    <button type="button" id="palette-open" class="kbd-hint" aria-label="Quick search (Ctrl K)"><kbd>⌘K</kbd></button>
+    <button type="submit" class="visually-hidden">Search</button>
   </form>
-  <button id="theme" class="icon-btn" type="button" aria-label="Dark theme" aria-pressed="false">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8A9.4 9.4 0 0 0 12 3z"/></svg>
+  <button id="theme" class="icon-btn" type="button" aria-label="Dark theme" aria-pressed="false"><i data-icon="moon"></i>
   </button>
 </header>
-<nav class="tabs" aria-label="Sections">
-  <a href="/" data-nav="/">Home</a>
-  <a href="/topics" data-nav="/topics">Topics</a>
-  <a href="/library" data-nav="/library">Library</a>
-  <a href="/settings" data-nav="/settings">Customize</a>
-</nav>
-<main id="view" tabindex="-1"><p class="status">Loading…</p></main>
+<div class="shell">
+  <aside class="side">
+    <nav class="tabs" aria-label="Sections">
+      <a href="/" data-nav="/"><i data-icon="home"></i><span>Home</span></a>
+      <a href="/topics" data-nav="/topics"><i data-icon="topics"></i><span>Topics</span></a>
+      <a href="/library" data-nav="/library"><i data-icon="library"></i><span>Library</span></a>
+      <a href="/settings" data-nav="/settings"><i data-icon="sliders"></i><span>Customize</span></a>
+    </nav>
+    <div class="side-extra" id="side-extra"></div>
+  </aside>
+  <main id="view" tabindex="-1"><p class="status">Loading…</p></main>
+</div>
 <div id="toast" role="status" aria-live="polite"></div>
 <dialog id="help" class="modal" aria-labelledby="help-title"></dialog>
 <dialog id="dialog" class="modal" aria-labelledby="dialog-title"></dialog>
+<dialog id="palette" class="modal palette" aria-label="Quick search"></dialog>
 <footer class="foot"><a href="/about">About</a><span>Data: <a href="https://hackertube.org/data" target="_blank" rel="noopener">HackerTube</a> (ODC-By)</span><span class="keys-hint">Press <kbd>?</kbd> for shortcuts</span></footer>
 <noscript><p class="status">Custom Tube needs JavaScript to run.</p></noscript>
 </body>

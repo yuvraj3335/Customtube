@@ -9,18 +9,28 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node scripts/build.js --watch & node --watch src/server.js",
     "data:fetch": "sh scripts/fetch-data.sh",
     "data:youtube": "node scripts/fetch-youtube-meta.js",
     "lint": "eslint .",
     "test": "node --test --test-concurrency=1 'test/unit/*.test.js' 'test/api/*.test.js'",
     "test:e2e": "node --test --test-concurrency=1 'test/e2e/*.test.js'",
-    "test:all": "npm run lint && npm test && npm run test:e2e"
+    "test:all": "npm run lint && npm test && npm run test:e2e",
+    "build": "node scripts/build.js",
+    "prestart": "npm run build",
+    "pretest": "npm run build",
+    "pretest:e2e": "npm run build"
   },
   "dependencies": {
+    "@floating-ui/dom": "1.8.0",
     "@huggingface/transformers": "4.3.1",
     "@petamoriken/float16": "3.9.3",
-    "lru-cache": "11.5.3"
+    "@tailwindcss/cli": "4.3.3",
+    "esbuild": "0.28.2",
+    "fuse.js": "7.5.0",
+    "lru-cache": "11.5.3",
+    "lucide": "1.60.0",
+    "tailwindcss": "4.3.3"
   },
   "devDependencies": {
     "eslint": "10.13.0",

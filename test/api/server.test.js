@@ -477,3 +477,39 @@ describe('round-3 hardening', () => {
     assert.ok(Number(r.headers.get('retry-after')) > 0);
   });
 });
+
+describe('suggestions', () => {
+  let fx;
+  let app;
+  before(async () => {
+    fx = makeFixture();
+    app = await start({ ds: loadDataset({ dataDir: fx.dataDir }), embedder: fakeEmbedder() });
+  });
+  after(async () => {
+    await app.close();
+    rmSync(fx.dir, { recursive: true, force: true });
+  });
+
+  test('the last word may be a prefix; earlier words must be whole', async () => {
+    const r = await app.get('/api/suggest?q=physics%20ta');
+    assert.equal(r.status, 200);
+    assert.ok(r.body.videos.length > 0 && r.body.videos.every((v) => /physics talk/i.test(v.title)));
+    assert.deepEqual(r.body.topics.map((t) => t.id), []);
+    const topic = await app.get('/api/suggest?q=databa');
+    assert.deepEqual(topic.body.topics.map((t) => t.id), ['databases']);
+    assert.ok(topic.body.videos.length <= 6);
+    assert.deepEqual((await app.get('/api/suggest?q=x')).body, { videos: [], topics: [] });
+    assert.equal((await app.get('/api/suggest')).status, 400);
+    assert.equal((await app.get(`/api/suggest?q=${'a'.repeat(201)}`)).status, 400);
+  });
+
+  test('service worker and manifest are served from the root', async () => {
+    const sw = await app.get('/sw.js');
+    assert.equal(sw.status, 200);
+    assert.match(sw.headers.get('content-type'), /javascript/);
+    assert.equal(sw.headers.get('cache-control'), 'no-cache');
+    const m = await app.get('/manifest.webmanifest');
+    assert.equal(m.body.short_name, 'Custom Tube');
+    assert.equal((await app.get('/static/sw.js')).status, 404);
+  });
+});

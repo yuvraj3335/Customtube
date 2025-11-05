@@ -20,6 +20,21 @@ const REAL = existsSync(path.join(cfg.dataDir, 'videos.jsonl'));
 const PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 const ADDED_VID = 'e2eShort001';
 
+// A stand-in for YouTube's embed page: it answers the "listening" handshake the way the real
+// player does, reports a position, and ends the video when told to (window.name === 'end').
+const FAKE_PLAYER = `<!doctype html><html><body><script>
+  let id = null;
+  const send = (msg) => parent.postMessage(JSON.stringify({ ...msg, id }), '*');
+  addEventListener('message', (e) => {
+    const m = JSON.parse(e.data);
+    if (m.event !== 'listening') return;
+    id = m.id;
+    send({ event: 'onReady' });
+    send({ event: 'infoDelivery', info: { currentTime: 125, duration: 600, playerState: 1 } });
+    setTimeout(() => send({ event: 'infoDelivery', info: { currentTime: 600, duration: 600, playerState: 0 } }), 400);
+  });
+</script></body></html>`;
+
 describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, () => {
   let fx;
   let server;
@@ -53,10 +68,13 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     base = `http://127.0.0.1:${server.address().port}`;
 
     browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' });
-    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
+    // Service workers would take requests out of the tests' control; one test below covers them.
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true, serviceWorkers: 'block' });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
     await context.route('**/*', (route) => {
       const url = new URL(route.request().url());
       if (url.origin === base) return route.continue();
+      if (url.origin === 'https://www.youtube-nocookie.com' && url.pathname.startsWith('/embed/')) return route.fulfill({ status: 200, contentType: 'text/html', body: FAKE_PLAYER });
       if (url.hostname === 'i.ytimg.com') return route.fulfill({ status: 200, contentType: 'image/png', body: PIXEL });
       return route.fulfill({ status: 204, body: '' }); // YouTube embeds and anything else
     });
@@ -474,10 +492,10 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await other.goto(base + '/library');
     await page.goto(base + '/');
     await page.waitForSelector('.card');
-    const [a, b] = await page.$$eval('.card', (els) => els.slice(0, 2).map((e) => e.dataset.vid));
+    const [a, b] = await page.$$eval('.home .grid .card', (els) => els.slice(0, 2).map((e) => e.dataset.vid));
     await page.evaluate(() => localStorage.setItem('customtube:likes', '[]'));
     await other.reload();
-    await page.locator(`.card[data-vid="${a}"] .card-link`).click();
+    await page.locator(`.home .grid .card[data-vid="${a}"] .card-link`).first().click();
     await page.click('#like');
     // the other tab now saves something else; it must not drop the like
     await other.evaluate((v) => document.querySelector(`[data-later="${v}"]`) ?? null, b);
@@ -511,6 +529,133 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.unroute('**/api/oembed*');
     const custom = await page.evaluate(() => JSON.parse(localStorage.getItem('customtube:custom')));
     assert.equal(custom.filter((c) => c.vid === 'dblClick001').length, 1);
+  });
+
+  test('player: progress is saved, the card shows it, revisiting offers resume, and the next video autoplays', async () => {
+    await page.evaluate(() => {
+      localStorage.removeItem('customtube:progress');
+      localStorage.removeItem('customtube:queue');
+      localStorage.setItem('customtube:autoplay', 'true');
+    });
+    await page.goto(base + '/');
+    await page.waitForSelector('.card');
+    const vid = await page.locator('.home .grid .card').first().getAttribute('data-vid');
+    await page.goto(`${base}/watch/${vid}`);
+    await page.waitForSelector('.upnext .card');
+    const next = await page.locator('.upnext .card').first().getAttribute('data-vid');
+    await page.click('#poster');
+    const src = await page.locator('.player iframe').getAttribute('src');
+    assert.match(src, /enablejsapi=1/);
+    // the fake player ends the video after 400 ms: a countdown to the next video appears
+    await page.waitForSelector('.countdown');
+    const saved = await page.evaluate((v) => JSON.parse(localStorage.getItem('customtube:progress'))[v], vid);
+    assert.equal(saved[0], 600, 'finished');
+    await page.click('#play-next');
+    await page.waitForURL(`**/watch/${next}?autoplay=1`);
+    await page.waitForSelector('.player iframe'); // autoplay: no poster click needed
+
+    // a half-watched video offers to resume, and starts there
+    await page.evaluate((v) => localStorage.setItem('customtube:progress', JSON.stringify({ [v]: [125, 600, Date.now()] })), vid);
+    await page.goto(`${base}/watch/${vid}`);
+    assert.match(await page.textContent('.resume-note'), /Resume at 2:05/);
+    await page.click('#poster');
+    assert.match(await page.locator('.player iframe').getAttribute('src'), /start=125/);
+    await page.click('#cancel-next', { timeout: 5000 });
+    assert.equal(await page.locator('.countdown').count(), 0, 'cancel removes the countdown');
+
+    // and it shows on Home under Continue watching, with a progress bar
+    await page.evaluate((v) => localStorage.setItem('customtube:progress', JSON.stringify({ [v]: [125, 600, Date.now()] })), vid);
+    await page.goto(base + '/');
+    await page.waitForSelector(`.row-scroll .card[data-vid="${vid}"] .progress`);
+  });
+
+  test('lists play in order inside the app', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.home .grid .card');
+    const vids = await page.$$eval('.home .grid .card', (els) => els.slice(0, 3).map((e) => e.dataset.vid));
+    await page.evaluate((ids) => localStorage.setItem('customtube:lists', JSON.stringify([{ id: 'qqqq1111', name: 'Queue test', vids: ids, created: new Date().toISOString() }])), vids);
+    await page.goto(base + '/list/qqqq1111');
+    await page.click('#play-list');
+    await page.waitForURL(`**/watch/${vids[0]}?autoplay=1`);
+    await page.waitForSelector('.queue-head');
+    assert.match(await page.textContent('.queue-head'), /Queue test.*1 of 3/s);
+    await page.waitForSelector('.countdown');
+    assert.match(await page.textContent('.countdown h3'), /\S/);
+    await page.click('#play-next');
+    await page.waitForURL(`**/watch/${vids[1]}?autoplay=1`);
+    await page.waitForSelector('.queue-head');
+    assert.match(await page.textContent('.queue-head'), /2 of 3/);
+    await page.click('.queue-head button');
+    await page.waitForFunction(() => !document.querySelector('.queue-head'));
+  });
+
+  test('quick search: Ctrl+K, suggestions as you type, Enter opens', async () => {
+    await page.goto(base + '/topics');
+    await page.keyboard.press('Control+k');
+    await page.waitForSelector('#palette[open]');
+    const suggested = page.waitForResponse((r) => r.url().includes('/api/suggest') && r.url().includes(REAL ? 'distri' : 'physi'));
+    await page.keyboard.type(REAL ? 'distri' : 'physi');
+    await suggested;
+    await page.waitForSelector('.palette-item img');
+    assert.ok((await page.locator('.palette-group:has-text("Videos")').count()) === 1);
+    await page.keyboard.press('ArrowDown'); // from "Search for …" to the first video
+    await page.keyboard.press('Enter');
+    await page.waitForURL('**/watch/**');
+    await page.keyboard.press('Control+k');
+    const libr = page.waitForResponse((r) => r.url().includes('/api/suggest?q=libr'));
+    await page.keyboard.type('libr');
+    await libr;
+    await page.waitForSelector('.palette-item:has-text("Library")');
+    await page.click('.palette-item:has-text("Library")');
+    await page.waitForURL('**/library');
+  });
+
+  test('first visit: pick topics, build the feed, and see them under Following', async () => {
+    await page.evaluate(() => localStorage.clear());
+    await page.goto(base + '/');
+    await page.waitForSelector('.welcome');
+    const chips = page.locator('.welcome .chip');
+    const ids = [await chips.nth(0).getAttribute('data-topic'), await chips.nth(1).getAttribute('data-topic')];
+    await chips.nth(0).click();
+    await chips.nth(1).click();
+    const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
+    await page.click('#welcome-done');
+    const sent = (await feed).request().postDataJSON();
+    assert.deepEqual(sent.follow_topics, ids);
+    assert.equal(await page.locator('.welcome').count(), 0);
+    const following = page.waitForResponse((r) => r.url().includes('/api/feed'));
+    await page.click('.home-tabs a:has-text("Following")');
+    const fsent = (await following).request().postDataJSON();
+    assert.equal(fsent.mix.following, 5);
+    assert.equal(fsent.mix.classics, 0);
+    const body = await (await following).json();
+    assert.ok(body.items.length > 0 && body.items.every((x) => x.source === 'following'));
+    assert.equal(await page.locator('.side-extra a[href^="/c/"]').count(), 2, 'followed topics in the sidebar');
+  });
+
+  test('share copies the link', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.home .grid .card');
+    const vid = await page.locator('.home .grid .card').first().getAttribute('data-vid');
+    await page.goto(`${base}/watch/${vid}`);
+    await page.click('#share');
+    await page.waitForSelector('#toast.on');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `${base}/watch/${vid}`);
+  });
+
+  test('installable: the service worker serves the app shell offline', async () => {
+    const ctx = await browser.newContext();
+    await ctx.route('**/*', (route) => (new URL(route.request().url()).origin === base ? route.continue() : route.fulfill({ status: 204, body: '' })));
+    const p = await ctx.newPage();
+    await p.goto(base + '/');
+    await p.evaluate(() => navigator.serviceWorker.ready);
+    const manifest = await (await fetch(`${base}/manifest.webmanifest`)).json();
+    assert.equal(manifest.name, 'Custom Tube');
+    await ctx.setOffline(true);
+    await p.goto(base + '/library');
+    await p.waitForSelector('nav.tabs a[href="/library"].on');
+    assert.match(await p.title(), /Custom Tube/);
+    await ctx.close();
   });
 
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {
