@@ -446,7 +446,8 @@ function showMenu(button, items, label) {
   openMenu = { el: menu, button, stopFollowing };
   // Tabbing out of the menu closes it, leaving focus where Tab put it.
   menu.addEventListener('focusout', (e) => {
-    if (openMenu?.el === menu && !menu.contains(e.relatedTarget)) closeMenu({ restoreFocus: false });
+    // focus moving to the menu's own button means a click on it, which toggles the menu itself
+    if (openMenu?.el === menu && !menu.contains(e.relatedTarget) && e.relatedTarget !== button) closeMenu({ restoreFocus: false });
   });
   menu.querySelector('button')?.focus();
 }
@@ -884,8 +885,11 @@ function topicPicker(areas, n) {
     type: 'button',
     class: 'chip more-topics',
     onclick: (e) => {
-      e.currentTarget.parentElement.classList.add('expanded');
+      const picker = e.currentTarget.parentElement;
+      picker.classList.add('expanded');
       e.currentTarget.remove();
+      // keep keyboard focus here: on the first topic that was hidden
+      picker.querySelectorAll('.chip[data-topic]')[8]?.focus();
     },
   }, 'More topics…');
   return h(
@@ -1079,6 +1083,7 @@ function startQueue(ids, name) {
   if (!ids.length) return;
   state.queue = { ids: ids.slice(0, 500), name };
   store.set('queue', state.queue);
+  chain.set([]); // playing a list is a fresh start, not a continuation of related-video autoplay
   navigate(`/watch/${ids[0]}?autoplay=1`);
 }
 
@@ -1132,7 +1137,8 @@ function countdown(player, next) {
   const go = () => {
     clearInterval(timer);
     const current = location.pathname.split('/').pop();
-    chain.set([...chain.get(), current]);
+    // only related-video hops count toward the autoplay limit; a list plays to its end
+    if (!state.queue?.ids.includes(next.vid)) chain.set([...chain.get(), current]);
     navigate(`/watch/${next.vid}?autoplay=1`);
   };
   const overlay = h(
@@ -2232,11 +2238,12 @@ addEventListener('popstate', () => route({ restore: true }));
 
 document.addEventListener('click', (e) => {
   if (!(e.target instanceof Element)) return;
-  if (openMenu && !e.target.closest('.menu')) closeMenu();
+  if (openMenu && !e.target.closest('.menu') && !e.target.closest('[data-more]')) closeMenu();
   const more = e.target.closest('[data-more]');
   if (more) {
     e.preventDefault();
-    cardMenu(more);
+    if (openMenu?.button === more) closeMenu();
+    else cardMenu(more);
     return;
   }
   const later = e.target.closest('[data-later]');

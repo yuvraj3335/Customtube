@@ -730,6 +730,30 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.unroute('**/api/suggest?q=rust*');
   });
 
+  test('round 11: a second click closes a menu; a reply that lands just after the next keystroke is dropped', async () => {
+    await page.goto(base + '/');
+    await page.waitForSelector('.home .grid .card');
+    const c = page.locator('.home .grid .card').first();
+    await c.hover();
+    await c.locator('.more-btn').click();
+    assert.equal(await page.locator('.menu').count(), 1);
+    await c.locator('.more-btn').click();
+    assert.equal(await page.locator('.menu').count(), 0, 'second click closes it');
+
+    await page.route('**/api/suggest?q=lin', async (route) => {
+      await new Promise((r) => setTimeout(r, 150));
+      await route.continue();
+    });
+    await page.keyboard.press('Control+k');
+    await page.keyboard.type('lin');
+    await page.waitForTimeout(200);
+    await page.keyboard.type('u');
+    await page.waitForTimeout(400);
+    assert.ok(!(await page.locator('.palette-item .label').allTextContents()).includes('Search for “lin”'));
+    await page.keyboard.press('Escape');
+    await page.unroute('**/api/suggest?q=lin');
+  });
+
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {
     await page.setViewportSize({ width: 375, height: 800 });
     for (const p of ['/', '/settings', '/topics', '/about']) {

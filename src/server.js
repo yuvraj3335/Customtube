@@ -187,6 +187,7 @@ function loadStatic(publicDir) {
   // /static/app.js?v=<version>, and the service worker names its cache after it, so a browser
   // never mixes a new page with an old cached script.
   const version = createHash('sha1')
+    .update(readFileSync(path.join(publicDir, 'index.html')))
     .update([...files.keys()].sort().map((k) => `${k}:${createHash('sha1').update(files.get(k).body).digest('hex')}`).join('|'))
     .digest('hex')
     .slice(0, 12);
@@ -206,7 +207,7 @@ function etagMatches(header, etag) {
   if (!header) return false;
   if (header.trim() === '*') return true;
   const bare = etag.replace(/^W\//, '');
-  return header.split(',').some((t) => t.trim().replace(/^W\//, '').replace(/-gz"$/, '"') === bare);
+  return header.split(',').some((t) => t.trim().replace(/^W\//, '') === bare);
 }
 
 // ---------- POST bodies ----------
@@ -673,7 +674,7 @@ export function createApp({
       const gzip = Boolean(file.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || ''));
       const etag = gzip ? file.etag.replace(/"$/, '-gz"') : file.etag;
       const headers = { ...SECURITY_HEADERS, 'content-type': file.type, 'cache-control': cache, etag, vary: 'Accept-Encoding' };
-      if (etagMatches(req.headers['if-none-match'], file.etag)) {
+      if (etagMatches(req.headers['if-none-match'], etag)) {
         res.writeHead(304, headers);
         return res.end();
       }
@@ -700,6 +701,7 @@ export function createApp({
     return send(req, res, page.status, shell.replace('<!--HEAD-->', () => head), {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
+      'x-app-shell': '1', // the service worker keeps only this as its offline page
     });
   }
 

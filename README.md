@@ -84,9 +84,9 @@ search model) that runs in about 300 MB of RAM.
   after 10 seconds.
 - `/healthz` reports `degraded: true` while search is keyword-only because the model couldn't load;
   the server retries loading it with backoff (30 s, doubling, up to every 10 minutes).
-- Rate limits: per client for every API route, plus server-wide budgets for the two expensive
-  things, building a new profile's feed (about 30% of one core at most) and searching (30 per
-  second). Over budget the server answers 503 with `Retry-After`.
+- Rate limits: per client for every API route, plus server-wide budgets for the expensive
+  things: building a new profile's feed (about 30% of one core at most), searching (30 per
+  second) and suggestions (100 per second). Over budget the server answers 503 with `Retry-After`.
 - Static files are compressed once at startup and served with ETags (304 when unchanged).
 
 ### YouTube metadata (for Shorts, lengths, dates and view counts)

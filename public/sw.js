@@ -36,7 +36,8 @@ self.addEventListener('fetch', (event) => {
       fetch(request)
         .then((res) => {
           // keep the offline shell as fresh as the last page that loaded
-          if (res.ok) {
+          // only the app page itself (marked by the server), not e.g. /static/licenses.txt
+          if (res.ok && res.headers.get('x-app-shell') === '1') {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put('/', copy));
           }

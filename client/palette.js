@@ -115,6 +115,7 @@ export function createPalette({ h, api, navigate, thumbUrl, commands }) {
 
   input.addEventListener('input', () => {
     active = 0;
+    seq++; // a reply for the previous text is stale from this keystroke on, not from the debounce
     clearTimeout(timer);
     timer = setTimeout(update, 90);
   });

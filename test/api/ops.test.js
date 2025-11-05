@@ -110,3 +110,20 @@ test('config: PUBLIC_URL and MAX_CONNECTIONS are validated', () => {
   assert.equal(readConfig({}).maxConnections, 2000);
   assert.equal(readConfig({ CUSTOMTUBE_EMBEDDER: 'OFF' }).embedder, false);
 });
+
+test('suggestions: cached per query (any case), and new queries share a server-wide budget', async (t) => {
+  const { base } = await boot(t, { suggestGlobalLimiter: createRateLimiter({ capacity: 2, refillPerSecond: 0.001 }) });
+  assert.equal((await fetch(`${base}/api/suggest?q=physics`)).status, 200);
+  assert.equal((await fetch(`${base}/api/suggest?q=PHYSICS`)).status, 200, 'cached');
+  assert.equal((await fetch(`${base}/api/suggest?q=biology`)).status, 200);
+  const busy = await fetch(`${base}/api/suggest?q=databases`);
+  assert.equal(busy.status, 503);
+  assert.ok(Number(busy.headers.get('retry-after')) >= 1);
+});
+
+test('only the app page is marked as the offline shell', async (t) => {
+  const { base } = await boot(t);
+  assert.equal((await fetch(`${base}/topics`)).headers.get('x-app-shell'), '1');
+  assert.equal((await fetch(`${base}/static/licenses.txt`)).headers.get('x-app-shell'), null);
+  assert.equal((await fetch(`${base}/healthz`)).headers.get('x-app-shell'), null);
+});
