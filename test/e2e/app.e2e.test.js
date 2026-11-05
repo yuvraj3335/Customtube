@@ -65,7 +65,7 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
       if (url.pathname === '/@e2echannel') return new Response(`<link rel="canonical" href="https://www.youtube.com/channel/${LIVE_CH}">`);
       if (url.pathname === '/feeds/videos.xml' && url.searchParams.get('channel_id') === LIVE_CH)
         return new Response(
-          `<feed><title>E2E Channel</title><entry><yt:videoId>liveE2Evid1</yt:videoId><title>Fresh upload from E2E</title><link rel="alternate" href="https://www.youtube.com/watch?v=liveE2Evid1"/><author><name>E2E Channel</name></author><published>${new Date(Date.now() - 3600_000).toISOString()}</published><media:statistics views="1234"/></entry></feed>`,
+          `<feed><title>E2E Channel</title><entry><yt:videoId>liveE2Evid1</yt:videoId><title>Fresh upload from E2E</title><link rel="alternate" href="https://www.youtube.com/watch?v=liveE2Evid1"/><author><name>E2E Channel</name></author><published>${new Date(Date.now() - 3600_000).toISOString()}</published><media:statistics views="1234"/></entry><entry><yt:videoId>liveE2Eshrt</yt:videoId><title>A quick E2E Short</title><link rel="alternate" href="https://www.youtube.com/shorts/liveE2Eshrt"/><author><name>E2E Channel</name></author><published>${new Date(Date.now() - 7200_000).toISOString()}</published><media:statistics views="99"/></entry></feed>`,
         );
       return new Response('', { status: 404 });
     };
@@ -225,7 +225,7 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.waitForSelector('.card');
     await page.locator('.card .card-link').first().click();
     await page.waitForSelector('#watch-more');
-    const channel = await page.locator('.owner b').first().textContent();
+    const channel = await page.locator('.owner .channel-link').first().textContent();
     await page.click('#watch-more');
     await page.click(`.menu-item:has-text("Hide ")`);
     await page.waitForSelector('#toast.on');
@@ -790,9 +790,9 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await card.locator('.card-link').click();
     await page.waitForURL('**/watch/liveE2Evid1');
     assert.match(await page.locator('.owner').textContent(), /new on YouTube/);
-    assert.equal((await page.textContent('#follow-channel')).trim(), 'Following channel');
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Following');
     await page.click('#follow-channel');
-    assert.equal((await page.textContent('#follow-channel')).trim(), 'Follow channel');
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Follow');
     // the live video stays openable from history after unfollowing
     await page.goto(base + '/history');
     await page.locator('.card[data-vid="liveE2Evid1"]').waitFor();
@@ -800,9 +800,39 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.equal(await page.locator('#live .chip.removable').count(), 0);
   });
 
+  test('channels: a channel page follows it, its Shorts get a Home shelf and play in the Shorts player', async () => {
+    await page.goto(base + '/channels');
+    await page.locator('#hn-channels .channel-card').first().waitFor();
+    assert.ok((await page.locator('#hn-channels .channel-card').count()) > 0);
+
+    await page.goto(base + '/channel/UCe2ee2ee2ee2ee2ee2ee2ee');
+    assert.equal(await page.textContent('.channel-head h1'), 'E2E Channel');
+    assert.equal(await page.locator('.channel-page .short-card[data-vid="liveE2Eshrt"]').count(), 1);
+    assert.equal(await page.locator('.channel-page .card[data-vid="liveE2Evid1"]').count(), 1);
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Follow');
+    await page.click('#follow-channel');
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Following');
+    await page.locator('#side-extra a[href="/channel/UCe2ee2ee2ee2ee2ee2ee2ee"]').waitFor();
+
+    await page.goto(base + '/');
+    const short = page.locator('.live-shelves .short-card[data-vid="liveE2Eshrt"]');
+    await short.waitFor();
+    await short.click();
+    await page.waitForURL('**/shorts?v=liveE2Eshrt');
+    await page.waitForSelector('.short-frame iframe');
+    assert.match(await page.getAttribute('.short-frame iframe', 'src'), /\/embed\/liveE2Eshrt\?/);
+    assert.equal(await page.locator('.short-frame iframe').count(), 1, 'only the Short in view plays');
+    assert.ok(await page.evaluate(() => document.body.classList.contains('shorts-mode')));
+    // leave in the app (no reload): the player, observer and shorts mode must all go
+    await page.click('nav.tabs a[href="/library"]');
+    await page.waitForURL('**/library');
+    assert.ok(!(await page.evaluate(() => document.body.classList.contains('shorts-mode'))), 'leaving Shorts restores the page');
+    assert.equal(await page.locator('.short-frame iframe').count(), 0);
+  });
+
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {
     await page.setViewportSize({ width: 375, height: 800 });
-    for (const p of ['/', '/settings', '/topics', '/about']) {
+    for (const p of ['/', '/settings', '/topics', '/about', '/channels', '/shorts', '/channel/UCe2ee2ee2ee2ee2ee2ee2ee']) {
       await page.goto(base + p);
       await page.waitForLoadState('networkidle');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

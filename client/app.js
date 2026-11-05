@@ -401,8 +401,9 @@ let config = { has_youtube_metadata: false, search_mode: 'keyword', filters: { t
 // ---------- shared components ----------
 
 const thumbUrl = (vid, frame) => `https://i.ytimg.com/vi/${vid}/${frame ? 'hq2' : 'hqdefault'}.jpg`;
-function thumbImg(vid, { eager = false } = {}) {
-  const img = h('img', { src: thumbUrl(vid, state.frames), alt: '', loading: eager ? 'eager' : 'lazy', decoding: 'async', width: 480, height: 360 });
+function thumbImg(vid, { eager = false, short = false } = {}) {
+  // YouTube's mid-video frame (hq2) is blank for Shorts, so they always get the uploader's image.
+  const img = h('img', { src: thumbUrl(vid, state.frames && !short), alt: '', loading: eager ? 'eager' : 'lazy', decoding: 'async', width: 480, height: 360 });
   img.addEventListener('error', () => {
     if (img.src.endsWith('/hq2.jpg')) img.src = thumbUrl(vid, false);
   });
@@ -420,7 +421,7 @@ function laterButton(vid) {
 
 function hnLine(item) {
   if (item.custom) return item.short ? 'Short · added by you' : 'Added by you';
-  if (item.live) return [item.short ? 'Short' : null, item.views != null ? `${compact(item.views)} views` : null, item.published ? ago(item.published) : null, 'new on YouTube'].filter(Boolean).join(' · ');
+  if (item.live) return [item.short ? 'Short' : null, item.views != null ? `${compact(item.views)} views` : null, item.published ? ago(item.published) : null].filter(Boolean).join(' · ');
   const parts = [item.recommenders ? plural(item.recommenders, 'HN recommender') : 'Cited on HN'];
   if (item.yt?.views != null) parts.push(`${compact(item.yt.views)} views`);
   if (item.yt?.published) parts.push(ago(item.yt.published));
@@ -447,7 +448,7 @@ function card(item) {
       h(
         'div',
         { class: 'thumb' },
-        thumbImg(item.vid),
+        thumbImg(item.vid, { short: item.short || item.format === 'short' }),
         item.short || item.format === 'short' ? h('span', { class: 'badge' }, 'Short') : null,
         item.yt?.duration_s ? h('span', { class: 'dur' }, fmtDuration(item.yt.duration_s)) : null,
         progressBar(item.vid),
@@ -953,6 +954,9 @@ async function home(token, { restore = false } = {}) {
   let live = null;
   let shown = 0;
   const used = new Set(); // across pages, so no video gets two cards
+  // New Shorts and the newest uploads from followed channels get shelves above the feed.
+  const liveShelves = h('div', { class: 'live-shelves' });
+  section.append(liveShelves);
   const key = homeKey() + location.search;
   const grid = infiniteGrid(
     section,
@@ -963,6 +967,15 @@ async function home(token, { restore = false } = {}) {
         const bad = live.failed.filter((s) => s.kind === 'channel').map((s) => state.prefs.liveChannels.find((c) => c.id === s.id)?.name ?? s.id);
         if (bad.length) toast(`Couldn’t load ${bad.slice(0, 2).join(', ')}${bad.length > 2 ? ` and ${bad.length - 2} more` : ''} from YouTube`);
         live = live.items.filter((it) => !mine.some((m) => m.vid === it.vid));
+        {
+          // filled even if the viewer has left: this Home is cached and comes back on Back
+          const shorts = live.filter((it) => it.short);
+          live = live.filter((it) => !it.short);
+          const fresh = tab === 'foryou' ? live.splice(0, 8) : [];
+          for (const it of [...shorts, ...fresh]) used.add(it.vid);
+          if (shorts.length) liveShelves.append(shortsShelf(shorts.slice(0, 20), { title: 'New Shorts' }));
+          if (fresh.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'New from your channels'), h('a', { href: '/channels' }, 'Channels')), h('div', { class: 'row-scroll' }, fresh.map(card))));
+        }
       }
       try {
         page = followingOnlyLive ? { items: [], next_offset: null } : await api('/api/feed', { ...profile, offset, n: 24 });
@@ -1483,8 +1496,8 @@ async function watchPage(token, vid) {
         h(
           'div',
           { class: 'owner' },
-          h('div', {}, h('b', {}, d.channel), h('p', { class: 'sub' }, facts.join(' · '))),
-          h('div', { class: 'actions' }, h('div', { class: 'seg', role: 'group', 'aria-label': 'Rate this video' }, voteBtn('like'), voteBtn('dislike')), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
+          h('div', {}, channelLink({ name: d.channel, vid: d.vid }), h('p', { class: 'sub' }, facts.join(' · '))),
+          h('div', { class: 'actions' }, followChannelButton({ name: d.channel, vid: d.vid }), h('div', { class: 'seg', role: 'group', 'aria-label': 'Rate this video' }, voteBtn('like'), voteBtn('dislike')), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
         ),
         d.duplicate_of ? h('p', { class: 'note' }, 'This is another upload of ', h('a', { href: `/watch/${d.duplicate_of}` }, 'a video in the collection'), '.') : null,
         d.yt?.embeddable === false ? h('p', { class: 'note' }, 'The uploader doesn’t allow this video to play on other sites. Open it on YouTube to watch.') : null,
@@ -1583,35 +1596,14 @@ function customWatchPage(c, { live = false } = {}) {
           h(
             'div',
             {},
-            h('b', {}, c.channel || 'Unknown channel'),
+            channelLink({ id: c.channelId, name: c.channel, vid: c.vid }),
             h('p', { class: 'sub' }, live ? [c.short ? 'Short' : 'Video', c.views != null ? `${compact(c.views)} views` : null, c.published ? ago(c.published) : null, c.source === 'topic' ? `found on YouTube for “${c.via}”` : 'new on YouTube'].filter(Boolean).join(' · ') : `${c.short ? 'Short' : 'Video'} you added · not from Hacker News`),
           ),
-          h('div', { class: 'actions' }, live && c.channelId ? followChannelButton({ id: c.channelId, name: c.channel }) : null, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
+          h('div', { class: 'actions' }, c.channel ? followChannelButton({ id: c.channelId, name: c.channel, vid: c.vid }) : null, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
         ),
       ),
     ),
   );
-}
-
-/** Follow or unfollow a YouTube channel: its new uploads join Home. */
-function followChannelButton(ch) {
-  const btn = h('button', { type: 'button', class: 'pill', id: 'follow-channel' });
-  const render = () => {
-    const on = state.prefs.liveChannels.some((c) => c.id === ch.id);
-    btn.classList.toggle('on', on);
-    // the label says the state, so no aria-pressed (it would be announced twice)
-    btn.replaceChildren(icon(on ? 'check' : 'plus'), on ? 'Following channel' : 'Follow channel');
-  };
-  btn.addEventListener('click', () => {
-    const on = state.prefs.liveChannels.some((c) => c.id === ch.id);
-    if (!on && state.prefs.liveChannels.length >= LIVE_MAX_CHANNELS) return toast(`You can follow up to ${LIVE_MAX_CHANNELS} channels`);
-    state.prefs.liveChannels = on ? state.prefs.liveChannels.filter((c) => c.id !== ch.id) : [...state.prefs.liveChannels, { id: ch.id, name: ch.name || ch.id }];
-    savePrefs();
-    render();
-    toast(on ? `Unfollowed ${ch.name}` : `Following ${ch.name}: its new uploads join your Home feed`);
-  });
-  render();
-  return btn;
 }
 
 function addToMineButton(c) {
@@ -2368,8 +2360,352 @@ function renderSide() {
       h('section', {}, h('h2', {}, 'Following'), state.prefs.followTopics.slice(0, 10).map((id) => h('a', { href: `/c/${id}` }, h('span', { class: 'dot' }), h('span', { class: 'truncate' }, names.get(id) ?? id)))),
     );
   }
+  if (state.prefs.liveChannels.length) {
+    sections.push(
+      h(
+        'section',
+        {},
+        h('h2', {}, h('a', { href: '/channels', class: 'side-h2-link' }, 'Subscriptions')),
+        state.prefs.liveChannels.slice(0, 12).map((c) => h('a', { href: `/channel/${c.id}` }, h('span', { class: 'ch-avatar xs', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('span', { class: 'truncate' }, c.name))),
+        state.prefs.liveChannels.length > 12 ? h('a', { href: '/channels', class: 'hint' }, `All ${state.prefs.liveChannels.length}`) : null,
+      ),
+    );
+  }
   sections.push(h('section', {}, h('a', { href: '/mine' }, icon('plus'), 'Add a video'), h('a', { href: '/history' }, icon('history'), 'History'), h('a', { href: '/about' }, icon('sparkles'), 'About')));
   side.replaceChildren(...sections);
+}
+
+// ---------- channels and Shorts ----------
+
+const isFollowing = (id) => state.prefs.liveChannels.some((c) => c.id === id);
+function followChannel(ch, on) {
+  if (on && !isFollowing(ch.id)) {
+    if (state.prefs.liveChannels.length >= LIVE_MAX_CHANNELS) {
+      toast(`You can follow up to ${LIVE_MAX_CHANNELS} channels`);
+      return false;
+    }
+    state.prefs.liveChannels = [...state.prefs.liveChannels, { id: ch.id, name: ch.name || ch.id }];
+  } else if (!on) state.prefs.liveChannels = state.prefs.liveChannels.filter((c) => c.id !== ch.id);
+  savePrefs();
+  renderSide();
+  // every Follow button on the page says the new state, not just the one clicked
+  for (const b of document.querySelectorAll('.follow')) b.followRender?.();
+  return true;
+}
+
+// A channel name → its YouTube channel id, found once (from one of its videos) and remembered.
+const channelIds = new Map(Object.entries(store.get('channelIds', {})).filter(([, id]) => CHANNEL_ID_RE.test(id)));
+async function channelIdFor({ id, name, vid }) {
+  if (id) return id;
+  const known = channelIds.get(name) ?? state.prefs.liveChannels.find((c) => c.name === name)?.id;
+  if (known) return known;
+  const ch = await api(`/api/live/resolve${qs({ q: `https://www.youtube.com/watch?v=${vid}` })}`);
+  channelIds.set(name, ch.channelId);
+  store.set('channelIds', Object.fromEntries([...channelIds].slice(-500)));
+  return ch.channelId;
+}
+
+/** The channel's name, linking to its page (found from one of its videos when needed). */
+function channelLink({ id, name, vid }) {
+  if (!name) return h('b', {}, 'Unknown channel');
+  if (id) return h('a', { class: 'channel-link', href: `/channel/${id}` }, name);
+  return h('button', {
+    type: 'button',
+    class: 'channel-link',
+    onclick: async (e) => {
+      const btn = e.currentTarget;
+      const at = routeToken;
+      btn.disabled = true;
+      try {
+        const chId = await channelIdFor({ name, vid });
+        // the viewer may have gone elsewhere while YouTube answered
+        if (current(at)) navigate(`/channel/${chId}`);
+      } catch (err) {
+        if (current(at)) toast(`Couldn’t open ${name} (${err.message})`);
+      }
+      btn.disabled = false;
+    },
+  }, name);
+}
+
+/** Follow or unfollow a YouTube channel: its new uploads join Home and Shorts. */
+function followChannelButton({ id, name, vid }, { compact: small = false } = {}) {
+  const btn = h('button', { type: 'button', class: `pill follow${small ? ' sm' : ''}`, dataset: { followName: name } });
+  if (!small) btn.id = 'follow-channel';
+  let chId = id ?? channelIds.get(name) ?? state.prefs.liveChannels.find((c) => c.name === name)?.id ?? null;
+  const render = () => {
+    const on = Boolean(chId) && isFollowing(chId);
+    btn.classList.toggle('on', on);
+    // the label says the state, so no aria-pressed (it would be announced twice)
+    btn.replaceChildren(icon(on ? 'check' : 'plus'), on ? 'Following' : 'Follow');
+    btn.setAttribute('aria-label', on ? `Unfollow ${name}` : `Follow ${name} on YouTube`);
+  };
+  btn.followRender = () => {
+    chId ??= id ?? channelIds.get(name) ?? state.prefs.liveChannels.find((c) => c.name === name)?.id ?? null;
+    render();
+  };
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      chId ??= await channelIdFor({ name, vid });
+      const on = !isFollowing(chId);
+      if (followChannel({ id: chId, name }, on)) toast(on ? `Following ${name}: new uploads join Home and Shorts` : `Unfollowed ${name}`);
+    } catch (err) {
+      toast(`Couldn’t find ${name} on YouTube (${err.message})`);
+    }
+    btn.disabled = false;
+    render();
+  });
+  render();
+  return btn;
+}
+
+const shortThumb = (vid) => h('img', { src: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`, alt: '', loading: 'lazy', decoding: 'async', width: 480, height: 360 });
+
+/** A vertical card for a Short: opens it in the Shorts player. */
+function shortCard(item, href) {
+  return h(
+    'a',
+    { class: 'short-card', href, dataset: { vid: item.vid } },
+    h('div', { class: 'short-thumb' }, shortThumb(item.vid), item.views != null ? h('span', { class: 'dur' }, `${compact(item.views)} views`) : null),
+    h('p', { class: 'short-title' }, item.title),
+    h('p', { class: 'card-meta' }, item.channel),
+  );
+}
+
+function shortsShelf(items, { href = (it) => `/shorts?v=${it.vid}`, title = 'Shorts' } = {}) {
+  return h(
+    'section',
+    { class: 'shelf', 'aria-label': title },
+    h('div', { class: 'shelf-head' }, h('h2', {}, icon('shorts'), title), h('a', { href: '/shorts' }, 'Open Shorts')),
+    h('div', { class: 'row-scroll shorts-row' }, items.map((it) => shortCard(it, href(it)))),
+  );
+}
+
+async function channelPage(token, id) {
+  const [live, nameHint] = [await api(`/api/live${qs({ channels: id })}`).catch((err) => ({ error: err })), state.prefs.liveChannels.find((c) => c.id === id)?.name];
+  if (!current(token)) return;
+  const source = live.sources?.[0];
+  if (live.error || !source?.ok) {
+    if (live.error?.status === 404 || source?.error?.includes('no such')) return notFound('YouTube has no channel with that id.');
+    if (!nameHint) throw live.error ?? new Error(source?.error ?? 'YouTube didn’t answer');
+  }
+  const name = source?.name || nameHint || 'Channel';
+  document.title = `${name} · ${SITE}`;
+  channelIds.set(name, id);
+  const items = (live.items ?? []).map((it) => ({ ...it, reason: null }));
+  rememberLive(items);
+  const shorts = items.filter((it) => it.short);
+  const videos = items.filter((it) => !it.short).map(liveAsItem);
+  const section = h(
+    'section',
+    { class: 'channel-page' },
+    h(
+      'header',
+      { class: 'channel-head' },
+      h('div', { class: 'ch-avatar', 'aria-hidden': 'true' }, name.slice(0, 1).toUpperCase()),
+      h('div', { class: 'min-w-0' }, h('h1', {}, name), h('p', { class: 'sub', id: 'channel-facts' }, items.length ? `${plural(items.length, 'recent upload')} on YouTube` : 'Couldn’t load recent uploads right now')),
+      h('div', { class: 'actions' }, followChannelButton({ id, name }), shorts.length ? h('a', { class: 'pill', href: `/shorts?channel=${id}` }, icon('shorts'), 'Play Shorts') : null, h('a', { class: 'pill', href: `https://www.youtube.com/channel/${id}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
+    ),
+  );
+  if (shorts.length) section.append(shortsShelf(shorts, { href: (it) => `/shorts?channel=${id}&v=${it.vid}` }));
+  if (videos.length) section.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Latest videos')), h('div', { class: 'grid' }, videos.map(card))));
+  view.replaceChildren(section);
+  // What Hacker News recommends from this channel, if anything.
+  const hn = await api(`/api/channel${qs({ name })}`).catch(() => null);
+  if (!current(token) || !hn?.items.length) return;
+  $('#channel-facts').textContent += ` · ${plural(hn.total, 'video')} recommended on Hacker News`;
+  section.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Loved on Hacker News')), h('div', { class: 'grid' }, hn.items.map(card))));
+}
+
+async function channelsPage(token) {
+  document.title = `Channels · ${SITE}`;
+  const mine = state.prefs.liveChannels;
+  const section = h(
+    'section',
+    { class: 'channels-page' },
+    pageHead('Channels', mine.length ? `You follow ${plural(mine.length, 'channel')}. Their new uploads join Home and Shorts.` : 'Follow channels and their new uploads join your Home feed and Shorts, fetched live from YouTube.', h('a', { class: 'pill', href: '/settings#live' }, icon('plus'), 'Add by link')),
+  );
+  if (mine.length) {
+    section.append(
+      h(
+        'section',
+        { class: 'shelf' },
+        h('div', { class: 'shelf-head' }, h('h2', {}, 'Following')),
+        h('div', { class: 'channel-grid' }, mine.map((c) => h('div', { class: 'channel-tile' }, h('a', { href: `/channel/${c.id}`, class: 'channel-tile-link' }, h('div', { class: 'ch-avatar sm', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('b', { class: 'truncate' }, c.name)), followChannelButton({ id: c.id, name: c.name }, { compact: true })))),
+      ),
+    );
+  }
+  const grid = h('div', { class: 'channel-grid wide', id: 'hn-channels' });
+  const more = h('button', { type: 'button', class: 'pill mt-4', id: 'more-channels' }, 'More channels');
+  section.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Channels Hacker News loves')), h('p', { class: 'sub mb-3' }, 'The channels with the most videos HN keeps recommending.'), grid, more));
+  view.replaceChildren(section);
+  let offset = 0;
+  const load = async () => {
+    more.disabled = true;
+    const page = await api(`/api/channels${qs({ n: 24, offset })}`);
+    if (!current(token)) return;
+    for (const c of page.items) {
+      grid.append(
+        h(
+          'div',
+          { class: 'channel-card' },
+          h('div', { class: 'channel-strip' }, c.top.map((vid) => h('a', { href: `/watch/${vid}`, tabindex: '-1', 'aria-hidden': 'true' }, thumbImg(vid)))),
+          h('div', { class: 'channel-card-body' }, h('div', { class: 'min-w-0' }, channelLink({ name: c.channel, vid: c.top[0] }), h('p', { class: 'card-meta' }, `${plural(c.videos, 'video')} · ${plural(c.recommenders, 'HN recommendation')}`)), followChannelButton({ name: c.channel, vid: c.top[0] }, { compact: true })),
+        ),
+      );
+    }
+    offset = page.next_offset ?? offset;
+    more.hidden = page.next_offset === null;
+    more.disabled = false;
+  };
+  more.addEventListener('click', () => load().catch((err) => toast(failure(err))));
+  await load();
+}
+
+/**
+ * Shorts, one at a time, full height: swipe or scroll (or ↑/↓, j/k) to the next. They come from
+ * the channels and searches you follow on YouTube and the Shorts you added yourself.
+ */
+async function shortsPage(token) {
+  document.title = `Shorts · ${SITE}`;
+  const params = new URLSearchParams(location.search);
+  const only = CHANNEL_ID_RE.test(params.get('channel') ?? '') ? params.get('channel') : null;
+  const startAt = VID_RE.test(params.get('v') ?? '') ? params.get('v') : null;
+  let items = [];
+  let failed = false;
+  if (only || hasLiveSources()) {
+    try {
+      const p = state.prefs;
+      const q = only ? { channels: only } : { ...(p.liveChannels.length ? { channels: p.liveChannels.map((c) => c.id).join(',') } : {}), ...(config.live?.topics && p.liveTopics.length ? { topics: p.liveTopics.join('|') } : {}) };
+      const res = await api(`/api/live${qs(q)}`);
+      items = res.items.filter((it) => it.short && !p.muteChannels.includes(it.channel));
+      rememberLive(items);
+    } catch {
+      failed = true;
+    }
+  }
+  if (!current(token)) return;
+  if (!only) items.push(...state.custom.filter((c) => c.short).reverse().map((c) => ({ ...c, mine: true })));
+  // Unwatched first (in feed order), then the ones you've seen; the one you opened leads.
+  const seen = new Set(state.seen);
+  const dis = new Set(state.dislikes);
+  items = items.filter((it, i, all) => all.findIndex((x) => x.vid === it.vid) === i && !dis.has(it.vid));
+  items = [...items.filter((it) => !seen.has(it.vid)), ...items.filter((it) => seen.has(it.vid))];
+  if (startAt) {
+    const known = items.find((it) => it.vid === startAt) ?? state.live.get(startAt) ?? state.custom.find((c) => c.vid === startAt);
+    items = [...(known ? [known] : [{ vid: startAt, title: 'Short', channel: '' }]), ...items.filter((it) => it.vid !== startAt)];
+  }
+  if (!items.length) {
+    view.replaceChildren(
+      h(
+        'section',
+        { class: 'empty' },
+        h('h1', {}, failed ? 'Couldn’t reach YouTube' : 'No Shorts yet'),
+        h('p', { class: 'sub mx-auto' }, failed ? 'Try again in a moment.' : 'Follow a few YouTube channels and their newest Shorts play here, one after another.'),
+        h('div', { class: 'actions mt-4 justify-center' }, h('a', { class: 'pill primary', href: '/channels' }, icon('plus'), 'Find channels'), h('a', { class: 'pill', href: '/mine' }, 'Add a Short by link')),
+      ),
+    );
+    return;
+  }
+
+  let active = null; // { slide, player }
+  const slides = items.map((it, i) => {
+    const frame = h('div', { class: 'short-frame' }, h('button', { type: 'button', class: 'poster', 'aria-label': `Play ${it.title}` }, shortThumb(it.vid), h('span', { class: 'play' }, icon('play'))));
+    const like = h('button', { type: 'button', class: `rail-btn${state.likes.includes(it.vid) ? ' on' : ''}`, 'aria-label': 'Like', 'aria-pressed': String(state.likes.includes(it.vid)) }, icon('up'), h('span', {}, 'Like'));
+    like.addEventListener('click', () => {
+      setVote(it.vid, 'like');
+      const on = state.likes.includes(it.vid);
+      like.classList.toggle('on', on);
+      like.setAttribute('aria-pressed', String(on));
+    });
+    const skip = h('button', { type: 'button', class: 'rail-btn', 'aria-label': 'Not interested' }, icon('down'), h('span', {}, 'Skip'));
+    skip.addEventListener('click', () => {
+      if (!state.dislikes.includes(it.vid)) setVote(it.vid, 'dislike');
+      go(i + 1);
+    });
+    const slide = h(
+      'article',
+      { class: 'short-slide', dataset: { vid: it.vid, index: String(i) }, 'aria-label': it.title, 'aria-roledescription': 'Short' },
+      h(
+        'div',
+        { class: 'short-stage' },
+        frame,
+        h(
+          'div',
+          { class: 'short-rail' },
+          like,
+          skip,
+          h('button', { type: 'button', class: `rail-btn${state.later.includes(it.vid) ? ' on' : ''}`, dataset: { later: it.vid }, 'aria-label': 'Watch later', 'aria-pressed': String(state.later.includes(it.vid)) }, icon('clock'), h('span', {}, 'Later')),
+          h('a', { class: 'rail-btn', href: `https://www.youtube.com/shorts/${it.vid}`, target: '_blank', rel: 'noopener', 'aria-label': 'Open on YouTube' }, icon('external'), h('span', {}, 'YouTube')),
+        ),
+      ),
+      h(
+        'div',
+        { class: 'short-info' },
+        h('p', { class: 'short-title' }, it.title),
+        h('div', { class: 'short-by' }, it.channel ? channelLink({ id: it.channelId, name: it.channel, vid: it.vid }) : null, it.channelId ? followChannelButton({ id: it.channelId, name: it.channel }, { compact: true }) : it.mine ? h('span', { class: 'hint' }, 'Added by you') : null),
+        h('p', { class: 'hint' }, [it.views != null ? `${compact(it.views)} views` : null, it.published ? ago(it.published) : null].filter(Boolean).join(' · ')),
+      ),
+    );
+    frame.querySelector('.poster').addEventListener('click', () => play(slide, true));
+    return slide;
+  });
+
+  function stop() {
+    if (!active) return;
+    active.player?.destroy();
+    const it = items[Number(active.slide.dataset.index)];
+    active.slide.querySelector('.short-frame').replaceChildren(h('button', { type: 'button', class: 'poster', 'aria-label': `Play ${it.title}`, onclick: (e) => play(e.currentTarget.closest('.short-slide'), true) }, shortThumb(it.vid), h('span', { class: 'play' }, icon('play'))));
+    active = null;
+  }
+  function play(slide, focus = false) {
+    if (active?.slide === slide) return;
+    stop();
+    const it = items[Number(slide.dataset.index)];
+    const p = createPlayer({
+      vid: it.vid,
+      title: it.title,
+      onProgress: (t, d) => saveProgress(it.vid, t, d),
+      // Shorts loop, like on YouTube
+      onEnded: () => {
+        p.command('seekTo', [0, true]);
+        p.command('playVideo');
+      },
+    });
+    slide.querySelector('.short-frame').replaceChildren(p.iframe);
+    if (focus) p.iframe.focus();
+    active = { slide, player: p };
+    markSeen(it.vid);
+    history.replaceState(history.state, '', `/shorts${qs({ ...(only ? { channel: only } : {}), v: it.vid })}`);
+  }
+  const go = (i) => slides[Math.max(0, Math.min(slides.length - 1, i))]?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+
+  const reel = h('div', { class: 'shorts-reel', tabindex: '-1', 'aria-label': 'Shorts' }, slides);
+  view.replaceChildren(h('section', { class: 'shorts-page' }, reel, h('div', { class: 'shorts-nav' }, h('button', { type: 'button', class: 'rail-btn', id: 'short-prev', 'aria-label': 'Previous Short', onclick: () => go(Number(active?.slide.dataset.index ?? 0) - 1) }, icon('arrow-up')), h('button', { type: 'button', class: 'rail-btn', id: 'short-next', 'aria-label': 'Next Short', onclick: () => go(Number(active?.slide.dataset.index ?? 0) + 1) }, icon('arrow-down')))));
+  // The Short mostly in view plays; the others go back to their posters.
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting && e.intersectionRatio >= 0.6) play(e.target);
+  }, { root: reel, threshold: [0.6] });
+  for (const s of slides) io.observe(s);
+  const onKey = (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || anyDialogOpen() || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '')) return;
+    const at = Number(active?.slide.dataset.index ?? 0);
+    if (!['ArrowDown', 'ArrowUp', 'j', 'k'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation(); // the page-wide j/k shortcuts move a selection; here they change Short
+    if (e.key === 'ArrowDown' || e.key === 'j') go(at + 1);
+    else go(at - 1);
+  };
+  addEventListener('keydown', onKey, true);
+  document.body.classList.add('shorts-mode');
+  cleanups.push(() => {
+    io.disconnect();
+    stop();
+    removeEventListener('keydown', onKey, true);
+    document.body.classList.remove('shorts-mode');
+  });
+  reel.focus({ preventScroll: true });
 }
 
 // ---------- router ----------
@@ -2405,7 +2741,7 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
   closeMenu();
   closeDialog();
   renderSide();
-  const section = ['/liked', '/later', '/history', '/mine', '/lists', '/library'].includes(pathname) || pathname.startsWith('/list/') ? '/library' : pathname.startsWith('/c/') || pathname.startsWith('/a/') || pathname === '/browse' ? '/topics' : pathname;
+  const section = ['/liked', '/later', '/history', '/mine', '/lists', '/library'].includes(pathname) || pathname.startsWith('/list/') ? '/library' : pathname.startsWith('/c/') || pathname.startsWith('/a/') || pathname === '/browse' ? '/topics' : pathname.startsWith('/channel/') ? '/channels' : pathname;
   for (const a of document.querySelectorAll('[data-nav]')) {
     const on = a.dataset.nav === section;
     a.classList.toggle('on', on);
@@ -2442,6 +2778,9 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
     else if (pathname === '/about') await aboutPage(token);
     else if (pathname === '/settings') await settingsPage(token);
     else if (pathname === '/mine') await minePage(token);
+    else if (pathname === '/shorts') await shortsPage(token);
+    else if (pathname === '/channels') await channelsPage(token);
+    else if ((m = /^\/channel\/(UC[A-Za-z0-9_-]{22})$/.exec(pathname))) await channelPage(token, m[1]);
     else notFound();
   } catch (err) {
     if (current(token)) {
@@ -2487,6 +2826,10 @@ function toggleLater(vid) {
   const on = toggleIn(state.later, vid);
   saveLists();
   for (const b of document.querySelectorAll(`.later-btn[data-later="${vid}"]`)) b.replaceWith(laterButton(vid));
+  for (const b of document.querySelectorAll(`.rail-btn[data-later="${vid}"]`)) {
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
   const pill = $('#save-later');
   if (pill && pill.dataset.later === vid) renderLaterPill(pill, vid);
   if (!on && location.pathname === '/later') route({ keepScroll: true, focus: '.card .card-link' });
@@ -2504,8 +2847,12 @@ $('#search').addEventListener('submit', (e) => {
 
 const savedTheme = store.get('theme', null);
 if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
-const isDark = () => (document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches);
-const syncThemeButton = () => $('#theme').setAttribute('aria-pressed', String(isDark()));
+// Dark unless you picked light.
+const isDark = () => document.documentElement.dataset.theme !== 'light';
+const syncThemeButton = () => {
+  $('#theme').setAttribute('aria-pressed', String(isDark()));
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isDark() ? '#09090b' : '#ffffff');
+};
 syncThemeButton();
 $('#theme').addEventListener('click', () => {
   const next = isDark() ? 'light' : 'dark';

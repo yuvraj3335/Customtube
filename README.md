@@ -29,6 +29,14 @@ filter and mix from there.
   technical"), which bring in the newest matching videos from all of YouTube. Every live video page
   has **Follow channel** and **Add to My videos**, and the **Following** tab shows your followed
   topics and channels together.
+- **Shorts** plays Shorts one per screen, like a phone: swipe or scroll (or ↑/↓, j/k) to the next,
+  the one in view plays and loops, with Like, Skip, Watch later and Follow beside it. They come from
+  the channels you follow and the Shorts you added.
+- **Channels** shows the channels Hacker News recommends most, each followable in one click, and
+  every channel has a page with its Shorts, its newest uploads and what HN recommends from it.
+  Followed channels are listed under **Subscriptions** in the sidebar, and any video page can
+  follow its channel.
+- **Dark by default**, with a light theme one click away.
 - **My videos** adds any YouTube video or Short by pasting its link. They join your feed, as often as
   you set.
 - **Every card's ⋯ menu**: Watch later, Save to list, Not interested (with undo), Hide this channel.
@@ -175,6 +183,8 @@ suggestions also have server-wide budgets; over those: 503 with `Retry-After`. `
 | `/api/docs` | `vids` (≤200): cards for saved lists, in order; unknown or deleted ids are skipped |
 | `/api/suggest` | `q` (≤200 chars; a single character returns nothing): up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix); cached |
 | `/api/live` | `channels` (YouTube channel ids `UC…`, comma-separated, ≤30) and/or `topics` (searches separated by `\|`, ≤8, each ≤60 chars; need a key): the newest videos, taking turns between sources, plus a status per source. A source that fails is reported in `sources` and the rest still load. Rate limited per client |
+| `/api/channels` | `n` (≤100, default 24), `offset`: the collection's channels, most HN recommendations first (summed over their videos), each with its three best videos |
+| `/api/channel` | `name` (≤200 chars), `n` (≤60): that channel's videos in the collection, best first |
 | `/api/live/resolve` | `q`: a channel link, @handle, channel id or video link → `{ channelId, channel }` |
 | `/api/oembed` | `vid`: title and channel of any YouTube video, for My videos (via YouTube's public oEmbed; rate limited) |
 | `/api/browse`, `/api/stats`, `/api/config` | none |

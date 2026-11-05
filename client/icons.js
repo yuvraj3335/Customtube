@@ -4,6 +4,8 @@
 import {
   ArrowDown,
   ArrowUp,
+  Clapperboard,
+  Tv,
   Ban,
   Check,
   Clock,
@@ -41,6 +43,8 @@ import {
 const ICONS = {
   'arrow-down': ArrowDown,
   'arrow-up': ArrowUp,
+  shorts: Clapperboard,
+  channels: Tv,
   ban: Ban,
   check: Check,
   clock: Clock,

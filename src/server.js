@@ -172,7 +172,8 @@ function appRoute(ds, pathname) {
     }
     return plain(`${q.slice(0, 80)} - search`);
   }
-  const fixed = { '/topics': 'Topics', '/browse': 'All videos', '/liked': 'Liked', '/later': 'Watch later', '/history': 'History', '/about': 'About', '/settings': 'Customize your feed', '/mine': 'My videos', '/library': 'Library', '/lists': 'Lists' };
+  if (/^\/channel\/UC[A-Za-z0-9_-]{22}$/.test(pathname)) return plain('Channel');
+  const fixed = { '/shorts': 'Shorts', '/channels': 'Channels', '/topics': 'Topics', '/browse': 'All videos', '/liked': 'Liked', '/later': 'Watch later', '/history': 'History', '/about': 'About', '/settings': 'Customize your feed', '/mine': 'My videos', '/library': 'Library', '/lists': 'Lists' };
   if (/^\/list\/[a-z0-9]{8}$/.test(pathname)) return plain('List');
   return fixed[pathname] ? plain(fixed[pathname]) : null;
 }
@@ -332,6 +333,23 @@ export function createApp({
   now = () => Date.now(),
 }) {
   const yt = youtube ?? createYoutube({ fetchImpl, log, now });
+  // The collection's channels, by how much HN recommends them (built once, on first use).
+  let channelIndex = null;
+  const channelsOf = () => {
+    if (channelIndex) return channelIndex;
+    const by = new Map();
+    for (const v of ds.videos) {
+      if (!v.visible || !v.channel) continue;
+      let c = by.get(v.channel);
+      if (!c) by.set(v.channel, (c = { channel: v.channel, videos: [], recommenders: 0 }));
+      c.videos.push(v);
+      c.recommenders += v.hn?.recommenders ?? 0; // recommendations: one person recommending two videos counts twice
+    }
+    for (const c of by.values()) c.videos.sort((a, b) => b.score - a.score || a.vid.localeCompare(b.vid));
+    const ranked = [...by.values()].sort((a, b) => b.recommenders - a.recommenders || b.videos.length - a.videos.length || a.channel.localeCompare(b.channel));
+    channelIndex = { by, ranked };
+    return channelIndex;
+  };
   const oembedCache = new LRUCache({ max: 2000 });
   const relatedCache = new LRUCache({ max: 2000 });
   const searchCache = new LRUCache({ max: 500 });
@@ -539,6 +557,26 @@ export function createApp({
       const limit = oembedLimiter.take(clientKey(req));
       if (!limit.ok) throw new HttpError(429, 'too many lookups, try again shortly', { 'retry-after': String(limit.retryAfter) });
       sendJson(req, res, 200, await yt.resolveChannel(target));
+    },
+
+    '/api/channels': (req, res, params) => {
+      assertKnownParams(params, ['n', 'offset']);
+      assertNonEmpty(params, ['n', 'offset']);
+      const n = parseIntParam(params.get('n'), 'n', { min: 1, max: 100, def: 24 });
+      const offset = parseIntParam(params.get('offset'), 'offset', { min: 0, max: 100_000, def: 0 });
+      const { ranked } = channelsOf();
+      const items = ranked.slice(offset, offset + n).map((c) => ({ channel: c.channel, videos: c.videos.length, recommenders: c.recommenders, top: c.videos.slice(0, 3).map((v) => v.vid) }));
+      sendJson(req, res, 200, { items, next_offset: offset + n < ranked.length ? offset + n : null, total: ranked.length }, { 'cache-control': 'public, max-age=300' });
+    },
+
+    '/api/channel': (req, res, params) => {
+      assertKnownParams(params, ['name', 'n']);
+      assertNonEmpty(params, ['name', 'n']);
+      const name = params.get('name');
+      if (!name || name.length > 200) throw badRequest('"name" is a channel name, at most 200 characters');
+      const n = parseIntParam(params.get('n'), 'n', { min: 1, max: 60, def: 24 });
+      const c = channelsOf().by.get(name);
+      sendJson(req, res, 200, { channel: name, total: c?.videos.length ?? 0, recommenders: c?.recommenders ?? 0, items: (c?.videos ?? []).slice(0, n).map((v) => cardDto(v)) }, { 'cache-control': 'public, max-age=300' });
     },
 
     '/api/stats': (req, res, params) => {

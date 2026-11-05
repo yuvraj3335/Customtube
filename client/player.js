@@ -78,6 +78,10 @@ export function createPlayer({ vid, title, start = 0, autoplay = true, onProgres
 
   return {
     iframe,
+    /** Run a player command, e.g. command('pauseVideo') or command('seekTo', [0, true]). */
+    command(func, args = []) {
+      post({ event: 'command', func, args });
+    },
     destroy() {
       clearInterval(hello);
       removeEventListener('message', onMessage);

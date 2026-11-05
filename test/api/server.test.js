@@ -174,6 +174,32 @@ describe('API without YouTube metadata', () => {
     assert.equal(s.body.duplicates, 1);
   });
 
+  test('channels: the collection’s channels ranked by HN recommenders, paged, with their best videos', async () => {
+    const { status, body } = await app.get('/api/channels?n=7');
+    assert.equal(status, 200);
+    assert.equal(body.total, 18, 'six topics, three channels each; the re-upload channel is hidden');
+    assert.equal(body.next_offset, 7);
+    assert.deepEqual(body.items[0], { channel: 'Channel 0-0', videos: 4, recommenders: 14, top: [vidOf(0, 0), vidOf(0, 3), vidOf(0, 6)] });
+    assert.deepEqual(body.items.slice(0, 6).map((c) => c.channel), ['Channel 0-0', 'Channel 1-0', 'Channel 2-0', 'Channel 3-0', 'Channel 4-0', 'Channel 5-0']);
+    assert.equal(body.items[6].recommenders, 13);
+    const last = await app.get('/api/channels?n=7&offset=14');
+    assert.equal(last.body.items.length, 4);
+    assert.equal(last.body.next_offset, null);
+    assert.ok(!(await app.get('/api/channels?n=100')).body.items.some((c) => c.channel === 'Reuploads Inc'));
+    for (const q of ['?n=', '?n=0', '?n=101', '?offset=-1', '?x=1']) assert.equal((await app.get(`/api/channels${q}`)).status, 400, q);
+  });
+
+  test('channel: a channel’s videos in the collection, best first', async () => {
+    const { status, body } = await app.get(`/api/channel?name=${encodeURIComponent('Channel 2-1')}&n=2`);
+    assert.equal(status, 200);
+    assert.equal(body.total, 3);
+    assert.equal(body.recommenders, 13);
+    assert.deepEqual(body.items.map((i) => i.vid), [vidOf(2, 1), vidOf(2, 4)]);
+    assert.equal(body.items[0].channel, 'Channel 2-1');
+    assert.deepEqual((await app.get('/api/channel?name=Nobody')).body, { channel: 'Nobody', total: 0, recommenders: 0, items: [] });
+    for (const q of ['', '?name=', `?name=${'x'.repeat(201)}`, '?name=a&n=', '?name=a&n=61']) assert.equal((await app.get(`/api/channel${q}`)).status, 400, q);
+  });
+
   test('oembed looks up added videos and maps YouTube errors', async () => {
     const ok = await app.get('/api/oembed?vid=shortvid001');
     assert.equal(ok.status, 200);
