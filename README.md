@@ -192,20 +192,3 @@ scripts/         build.js (esbuild + Tailwind), dev.js, fetch-data.sh, fetch-you
 test/            unit, api and e2e tests, plus the fixture generator
 ```
 
-## Licence
-
-Copyright © 2026 the Custom Tube authors. All rights reserved (see `LICENSE`). Third-party software
-and its licences are listed in `THIRD_PARTY_NOTICES.md`; the web client serves the notices for the
-code it bundles at `/static/licenses.txt` (linked from About).
-
-## Credits and data licence
-
-The video data comes from the [HackerTube](https://hackertube.org) data export (exported 2026-10-31),
-released under the [Open Data Commons Attribution License (ODC-By) v1.0](https://opendatacommons.org/licenses/by/1-0/),
-and derived from the [open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news)
-archive. Hacker News data is provided by Y Combinator, and comments remain the work of their authors.
-The labels, summaries and topics were written by an LLM, so expect a few to be off. Video titles and
-channel names belong to their creators.
-
-The data is not committed to this repository; `npm run data:fetch` downloads it. Custom Tube is an
-independent project, not affiliated with HackerTube, YouTube, Google, Hacker News or Y Combinator.
