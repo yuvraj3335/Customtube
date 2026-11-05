@@ -360,7 +360,10 @@ function laterButton(vid) {
 
 function hnLine(item) {
   if (item.custom) return item.short ? 'Short · added by you' : 'Added by you';
-  return item.recommenders ? `${plural(item.recommenders, 'HN recommender')} · ${plural(item.rec_months, 'month')}` : 'Cited on HN, not recommended';
+  const parts = [item.recommenders ? plural(item.recommenders, 'HN recommender') : 'Cited on HN'];
+  if (item.yt?.views != null) parts.push(`${compact(item.yt.views)} views`);
+  if (item.yt?.published) parts.push(ago(item.yt.published));
+  return parts.join(' · ');
 }
 
 /** How much of a video you've watched, as a thin bar on its thumbnail. */
@@ -373,7 +376,7 @@ function progressBar(vid) {
 }
 
 function card(item) {
-  const meta = [item.channel, item.yt?.views != null ? `${compact(item.yt.views)} views` : null, item.yt?.published ? ago(item.yt.published) : null].filter(Boolean).join(' · ');
+  const meta = item.channel || '';
   return h(
     'article',
     { class: 'card', dataset: { vid: item.vid, channel: item.channel || '' } },
@@ -394,8 +397,8 @@ function card(item) {
         h('h3', { class: 'card-title' }, item.title),
         h('p', { class: 'card-meta' }, meta),
         h('p', { class: 'card-meta' }, hnLine(item)),
-        item.reason ? h('p', { class: 'card-reason' }, item.reason) : null,
-        item.via ? h('p', { class: 'card-reason' }, `Topic match · ${item.via}`) : null,
+        item.reason ? h('p', { class: 'card-reason' }, icon('sparkles'), h('span', {}, item.reason)) : null,
+        item.via ? h('p', { class: 'card-reason' }, icon('topics'), h('span', {}, `Topic match · ${item.via}`)) : null,
       ),
     ),
     laterButton(item.vid),
@@ -777,7 +780,7 @@ async function home(token, { restore = false } = {}) {
       ['foryou', 'For you', '/'],
       ['following', 'Following', '/?tab=following'],
     ].map(([id, label, href]) => h('a', { class: `chip${tab === id ? ' on' : ''}`, href, 'aria-current': tab === id ? 'page' : null }, label)),
-    h('a', { class: 'chip', href: '/settings' }, icon('sliders'), 'Customize'),
+    h('a', { class: 'chip tune', href: '/settings' }, icon('sliders'), 'Tune feed'),
   );
   section.append(tabs);
 
@@ -1359,7 +1362,7 @@ async function watchPage(token, vid) {
           'div',
           { class: 'owner' },
           h('div', {}, h('b', {}, d.channel), h('p', { class: 'sub' }, facts.join(' · '))),
-          h('div', { class: 'actions' }, voteBtn('like'), voteBtn('dislike'), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
+          h('div', { class: 'actions' }, h('div', { class: 'seg', role: 'group', 'aria-label': 'Rate this video' }, voteBtn('like'), voteBtn('dislike')), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
         ),
         d.duplicate_of ? h('p', { class: 'note' }, 'This is another upload of ', h('a', { href: `/watch/${d.duplicate_of}` }, 'a video in the collection'), '.') : null,
         d.yt?.embeddable === false ? h('p', { class: 'note' }, 'The uploader doesn’t allow this video to play on other sites. Open it on YouTube to watch.') : null,

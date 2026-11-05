@@ -44,6 +44,7 @@ const STATIC_TYPES = {
   '.svg': 'image/svg+xml',
   '.webmanifest': 'application/manifest+json',
   '.png': 'image/png',
+  '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
 };

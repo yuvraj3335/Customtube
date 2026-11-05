@@ -6,7 +6,7 @@
 //   node scripts/build.js --watch   rebuild on change (npm run dev)
 
 import { spawn } from 'node:child_process';
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
@@ -58,8 +58,17 @@ function tailwind() {
  * public/licenses.txt: the licence text of every npm package bundled into public/app.js (and
  * Tailwind, whose CSS ships too), so the shipped client carries its third-party notices.
  */
+// The UI font, self-hosted (the CSP allows same-origin fonts only).
+const FONTS = [
+  ['@fontsource-variable/inter/files/inter-latin-wght-normal.woff2', 'inter-latin.woff2'],
+  ['@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2', 'inter-latin-ext.woff2'],
+];
+function copyFonts() {
+  for (const [from, to] of FONTS) copyFileSync(path.join(root, 'node_modules', from), path.join(root, 'public', to));
+}
+
 function writeLicenses(metafile) {
-  const packages = new Set(['tailwindcss']);
+  const packages = new Set(['tailwindcss', '@fontsource-variable/inter']);
   for (const input of Object.keys(metafile.inputs)) {
     const m = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(input);
     if (m) packages.add(m[1]);
@@ -74,6 +83,7 @@ function writeLicenses(metafile) {
   writeFileSync(path.join(root, 'public/licenses.txt'), parts.join('\n'));
 }
 
+copyFonts();
 if (watch) {
   const ctx = await esbuild.context(js);
   await ctx.watch();
@@ -83,5 +93,5 @@ if (watch) {
   const t0 = Date.now();
   const [result] = await Promise.all([esbuild.build(js), tailwind()]);
   writeLicenses(result.metafile);
-  console.log(`built public/app.js, public/styles.css and public/licenses.txt in ${Date.now() - t0} ms`);
+  console.log(`built public/app.js, public/styles.css, fonts and public/licenses.txt in ${Date.now() - t0} ms`);
 }
