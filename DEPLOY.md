@@ -65,5 +65,5 @@ tube.example.com {
 - `/healthz` is the health check (`degraded: true` means search is keyword-only for now).
 - Everyone's likes, lists and settings live in their own browser, so there is no database to back
   up and nothing personal on the server.
-- The data and its attribution: the HackerTube export is ODC-By 1.0, credited in the app footer and
-  About page. Keep that credit when you publish.
+- The data is licensed ODC-By 1.0, which requires the credit line on the About page. Keep it when
+  you publish.

@@ -1,4 +1,4 @@
-// Loads the HackerTube data export (plus optional YouTube metadata) into memory and derives
+// Loads the video data export (plus optional YouTube metadata) into memory and derives
 // everything the API needs: indexes, per-video HN stats, duplicate groups, topic centroids
 // and normalized search text. The whole dataset is small (6,454 videos), so it lives in RAM.
 

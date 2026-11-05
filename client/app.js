@@ -1594,20 +1594,11 @@ async function aboutPage(token) {
       h('p', {}, 'Pick formats (Shorts, regular, long), kinds of video, topics to follow or mute, channels to hide and how much of each source Home mixes in, under ', h('a', { href: '/settings' }, 'Customize'), '. Add any YouTube video or Short under ', h('a', { href: '/mine' }, 'My videos'), '.'),
       h('h2', {}, 'Keyboard shortcuts'),
       shortcutTable(),
-      h('h2', {}, 'Credits and licence'),
-      h(
-        'p',
-        {},
-        'The data comes from the ',
-        ext('https://hackertube.org/data', 'HackerTube data export'),
-        ' (exported 2026-10-31), released under ',
-        ext('https://opendatacommons.org/licenses/by/1-0/', 'ODC-By 1.0'),
-        ', which is derived from the ',
-        ext('https://huggingface.co/datasets/open-index/hacker-news', 'open-index/hacker-news'),
-        ' archive. Hacker News data is provided by Y Combinator, and comments remain the work of their authors. Labels and summaries were written by an LLM, so expect a few to be off.',
-      ),
+      h('h2', {}, 'Credits'),
+      // Required by the data licence (ODC-By 1.0): keep this line wherever the data is used.
+      h('p', { class: 'fine' }, 'Video data: HackerTube data export (hackertube.org), ODC-By 1.0, derived from the open-index/hacker-news archive. Hacker News comments remain the work of their authors.'),
       h('p', { class: 'fine' }, 'Open-source software in this app: ', h('a', { href: '/static/licenses.txt', target: '_blank', rel: 'noopener' }, 'licences and notices'), '.'),
-      h('p', { class: 'fine' }, 'Custom Tube is an independent project, not affiliated with HackerTube, YouTube, Google, Hacker News or Y Combinator. Video titles and channel names belong to their creators.', s.has_youtube_metadata ? ' Video statistics come from the YouTube Data API.' : ''),
+      h('p', { class: 'fine' }, 'Custom Tube is not affiliated with YouTube, Google, Hacker News or Y Combinator. Video titles and channel names belong to their creators.', s.has_youtube_metadata ? ' Video statistics come from the YouTube Data API.' : ''),
     ),
   );
 }

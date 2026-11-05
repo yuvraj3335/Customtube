@@ -1,4 +1,4 @@
-// A small synthetic export in the same format as the HackerTube data, so tests run without
+// A small synthetic export in the same format as the real data export, so tests run without
 // the real 50 MB download and can assert exact behaviour.
 //
 // 6 topics in 2 areas, 10 videos per topic. Each topic has its own direction in an 8-d

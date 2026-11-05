@@ -47,7 +47,7 @@ Needs Node 22.23.4+ (or 24.22.1+); `nvm use` picks the version from `.nvmrc`. `d
 
 ```bash
 npm ci
-npm run data:fetch      # downloads the HackerTube data export (18 MB zip, 48 MB unpacked) into data/raw/
+npm run data:fetch      # downloads the data export (18 MB zip, 48 MB unpacked) into data/raw/export
 npm start               # builds the client, then serves http://127.0.0.1:8080
 ```
 
@@ -62,7 +62,7 @@ is ready, search uses keywords only.
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT`, `HOST` | `8080`, `127.0.0.1` | Where the server listens |
-| `CUSTOMTUBE_DATA_DIR` | `data/raw/hackertube-data` | The unzipped data export |
+| `CUSTOMTUBE_DATA_DIR` | `data/raw/export` | The unzipped data export |
 | `CUSTOMTUBE_YOUTUBE_META` | `data/youtube_meta.jsonl` | Optional YouTube metadata (below) |
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
@@ -165,7 +165,7 @@ npm run test:e2e    # the real client in headless Chrome
 npm run test:all
 ```
 
-The browser tests use the real data and the real model when `data/raw/hackertube-data` exists, and
+The browser tests use the real data and the real model when `data/raw/export` exists, and
 the fixture otherwise. They need Google Chrome installed, or `CHROME_PATH` set to a Chromium-family
 browser. Every request that would leave localhost (thumbnails, YouTube) is answered locally.
 

@@ -749,7 +749,7 @@ function parsePublicUrl(value) {
 }
 
 export function readConfig(env = process.env) {
-  const dataDir = path.resolve(env.CUSTOMTUBE_DATA_DIR || path.join(ROOT, 'data/raw/hackertube-data'));
+  const dataDir = path.resolve(env.CUSTOMTUBE_DATA_DIR || path.join(ROOT, 'data/raw/export'));
   const port = parseIntParam(env.PORT ?? '', 'PORT', { min: 0, max: 65535, def: 8080 });
   return {
     dataDir,
