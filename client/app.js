@@ -101,6 +101,7 @@ const SOURCE_LABELS = {
   corec: ['Same recommenders', 'What the HN people behind your likes also recommend'],
   following: ['Topics you follow', 'Best videos from followed topics'],
   mine: ['My videos', 'Videos and Shorts you added yourself'],
+  live: ['Live from YouTube', 'New uploads from channels and topics you follow on YouTube'],
 };
 const DEFAULT_PREFS = {
   formats: ['short', 'standard', 'long'],
@@ -108,7 +109,9 @@ const DEFAULT_PREFS = {
   followTopics: [],
   muteTopics: [],
   muteChannels: [],
-  mix: { classics: 2, recent: 2, explore: 1, gems: 1, similar: 4, corec: 2, following: 3, mine: 2 },
+  mix: { classics: 2, recent: 2, explore: 1, gems: 1, similar: 4, corec: 2, following: 3, mine: 2, live: 3 },
+  liveChannels: [], // { id: 'UC…', name } followed on YouTube
+  liveTopics: [], // free-text searches run on YouTube (needs a key on the server)
   news: false,
   cited: false,
 };
@@ -130,9 +133,21 @@ function sanitizePrefs(raw) {
     muteTopics: strList(p.muteTopics).filter((t) => /^[a-z0-9-]+$/.test(t) && !strList(p.followTopics).includes(t)),
     muteChannels: strList(p.muteChannels),
     mix,
+    liveChannels: sanitizeLiveChannels(p.liveChannels),
+    // the same rules the server checks: no "|" (it separates searches), no control characters
+    liveTopics: strList(p.liveTopics, LIVE_MAX_TOPICS).map((t) => t.trim().replace(/\s+/g, ' ')).filter((t) => t && t.length <= 60 && !/[|\u0000-\u001f\u007f]/.test(t)),
     news: p.news === true,
     cited: p.cited === true,
   };
+}
+const CHANNEL_ID_RE = /^UC[A-Za-z0-9_-]{22}$/;
+const LIVE_MAX_CHANNELS = 30;
+const LIVE_MAX_TOPICS = 8;
+function sanitizeLiveChannels(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = new Map();
+  for (const c of raw) if (c && CHANNEL_ID_RE.test(c.id) && !out.has(c.id)) out.set(c.id, { id: c.id, name: typeof c.name === 'string' && c.name ? c.name.slice(0, 200) : c.id });
+  return [...out.values()].slice(0, LIVE_MAX_CHANNELS);
 }
 function sanitizeCustom(raw) {
   if (!Array.isArray(raw)) return [];
@@ -152,6 +167,50 @@ function sanitizeCustom(raw) {
   return out.slice(-500);
 }
 state.prefs = sanitizePrefs(store.get('prefs', null));
+// Live videos seen in a feed: kept so their watch pages, history and lists can show them.
+function sanitizeLive(raw) {
+  const out = new Map();
+  for (const c of Array.isArray(raw) ? raw : []) {
+    if (!c || !VID_RE.test(c.vid) || out.has(c.vid)) continue;
+    out.set(c.vid, {
+      vid: c.vid,
+      title: typeof c.title === 'string' && c.title ? c.title.slice(0, 300) : 'Untitled video',
+      channel: typeof c.channel === 'string' ? c.channel.slice(0, 200) : '',
+      channelId: CHANNEL_ID_RE.test(c.channelId) ? c.channelId : null,
+      short: c.short === true,
+      duration_s: Number.isFinite(c.duration_s) && c.duration_s > 0 ? c.duration_s : null,
+      views: Number.isFinite(c.views) && c.views >= 0 ? c.views : null,
+      published: typeof c.published === 'string' && !Number.isNaN(Date.parse(c.published)) ? c.published : null,
+      via: typeof c.via === 'string' ? c.via.slice(0, 200) : '',
+      source: c.source === 'topic' ? 'topic' : 'channel',
+    });
+  }
+  return new Map([...out].slice(-LIVE_HARD_MAX));
+}
+const LIVE_KEPT = 600; // live videos only seen in a feed
+const LIVE_HARD_MAX = 3000; // including ones you saved, liked or watched
+state.live = sanitizeLive(store.get('live', []));
+function rememberLive(items) {
+  // start from what other tabs stored, so this tab doesn't write back an older copy
+  const merged = sanitizeLive(store.get('live', []));
+  for (const it of items) {
+    merged.delete(it.vid);
+    merged.set(it.vid, it);
+  }
+  // Videos you saved, liked, disliked or watched stay; of the rest, only the newest LIVE_KEPT.
+  const pinned = new Set([...state.later, ...state.likes, ...state.dislikes, ...state.seen, ...Object.keys(state.progress), ...state.lists.flatMap((l) => l.vids)]);
+  let loose = [...merged.keys()].filter((vid) => !pinned.has(vid)).length;
+  for (const vid of [...merged.keys()]) {
+    if (loose <= LIVE_KEPT) break;
+    if (!pinned.has(vid)) {
+      merged.delete(vid);
+      loose--;
+    }
+  }
+  state.live = sanitizeLive([...merged.values()]);
+  store.set('live', [...state.live.values()]);
+}
+const liveAsItem = (c) => ({ ...c, live: true, yt: { duration_s: c.duration_s, views: c.views, published: c.published } });
 state.custom = sanitizeCustom(store.get('custom', []));
 const LIST_ID_RE = /^[a-z0-9]{8}$/;
 function sanitizeLists(raw) {
@@ -237,7 +296,8 @@ function curationBody(p = state.prefs) {
   if (p.followTopics.length) out.follow_topics = p.followTopics;
   if (p.muteTopics.length) out.mute_topics = p.muteTopics;
   if (p.muteChannels.length) out.mute_channels = p.muteChannels;
-  const mix = Object.fromEntries(Object.entries(p.mix).filter(([k, w]) => k !== 'mine' && w !== DEFAULT_PREFS.mix[k]));
+  // "mine" and "live" are mixed in by this page, not by the server
+  const mix = Object.fromEntries(Object.entries(p.mix).filter(([k, w]) => k !== 'mine' && k !== 'live' && w !== DEFAULT_PREFS.mix[k]));
   if (Object.keys(mix).length) out.mix = mix;
   if (p.news) out.news = true;
   if (p.cited) out.cited = true;
@@ -360,6 +420,7 @@ function laterButton(vid) {
 
 function hnLine(item) {
   if (item.custom) return item.short ? 'Short · added by you' : 'Added by you';
+  if (item.live) return [item.short ? 'Short' : null, item.views != null ? `${compact(item.views)} views` : null, item.published ? ago(item.published) : null, 'new on YouTube'].filter(Boolean).join(' · ');
   const parts = [item.recommenders ? plural(item.recommenders, 'HN recommender') : 'Cited on HN'];
   if (item.yt?.views != null) parts.push(`${compact(item.yt.views)} views`);
   if (item.yt?.published) parts.push(ago(item.yt.published));
@@ -398,7 +459,7 @@ function card(item) {
         h('p', { class: 'card-meta' }, meta),
         h('p', { class: 'card-meta' }, hnLine(item)),
         item.reason ? h('p', { class: 'card-reason' }, icon('sparkles'), h('span', {}, item.reason)) : null,
-        item.via ? h('p', { class: 'card-reason' }, icon('topics'), h('span', {}, `Topic match · ${item.via}`)) : null,
+        item.via && !item.live ? h('p', { class: 'card-reason' }, icon('topics'), h('span', {}, `Topic match · ${item.via}`)) : null,
       ),
     ),
     laterButton(item.vid),
@@ -752,7 +813,36 @@ function filterBar({ search = false } = {}) {
 // Home is kept when you leave it, so Back returns to the same cards at the same scroll position
 // (as long as your likes, dislikes and settings haven't changed in the meantime).
 let homeCache = null;
-const homeKey = () => JSON.stringify([state.likes, state.dislikes, state.prefs, state.custom.map((c) => c.vid), SEED]);
+const homeKey = () => JSON.stringify([state.likes, state.dislikes, state.prefs, state.custom.map((c) => c.vid), SEED, liveEpoch]);
+// Bumped by "Refresh" so Home fetches live videos again.
+let liveEpoch = 0;
+const hasLiveSources = () => state.prefs.liveChannels.length > 0 || (config.live?.topics && state.prefs.liveTopics.length > 0);
+
+/**
+ * New videos from the YouTube channels and topics the viewer follows, filtered by their settings:
+ * formats, hidden channels, and what they've already watched, liked or disliked.
+ */
+async function liveFeedPicks() {
+  if (!hasLiveSources()) return { items: [], failed: [] };
+  const p = state.prefs;
+  const params = {};
+  if (p.liveChannels.length) params.channels = p.liveChannels.map((c) => c.id).join(',');
+  if (config.live?.topics && p.liveTopics.length) params.topics = p.liveTopics.join('|');
+  const res = await api(`/api/live${qs(params)}`);
+  const formats = new Set(p.formats);
+  const formatOk = (it) => {
+    if (it.short) return formats.has('short');
+    if (it.duration_s && it.duration_s > 3600) return formats.has('long');
+    if (it.duration_s) return formats.has('standard');
+    return formats.has('standard'); // a channel feed has no lengths: count it as a regular upload
+  };
+  const skip = new Set([...state.seen, ...state.likes, ...state.dislikes]);
+  const items = res.items
+    .filter((it) => !skip.has(it.vid) && formatOk(it) && !p.muteChannels.includes(it.channel))
+    .map((it) => ({ ...it, reason: it.source === 'topic' ? `New on YouTube · “${it.via}”` : `New from ${it.via}` }));
+  rememberLive(items);
+  return { items: items.map(liveAsItem), failed: res.sources.filter((s) => !s.ok) };
+}
 
 const homeTab = () => {
   const t = new URLSearchParams(location.search).get('tab');
@@ -806,13 +896,13 @@ async function home(token, { restore = false } = {}) {
     });
   }
 
-  if (tab === 'following' && !state.prefs.followTopics.length) {
+  if (tab === 'following' && !state.prefs.followTopics.length && !hasLiveSources()) {
     section.append(
       h(
         'section',
         { class: 'welcome', 'aria-labelledby': 'follow-title' },
         h('h2', { id: 'follow-title' }, 'Follow a few topics'),
-        h('p', { class: 'sub' }, 'Videos from the topics you follow show up here. Pick some, then show them.'),
+        h('p', { class: 'sub' }, 'Videos from the topics you follow show up here. Pick some, then show them. You can also follow YouTube channels under ', h('a', { href: '/settings#live' }, 'Customize'), '.'),
         areas ? topicPicker(areas, 18) : null,
         h('div', { class: 'actions mt-4' }, h('button', { type: 'button', class: 'pill primary', id: 'show-following', onclick: () => (homeCache = null, route({ keepScroll: true })) }, icon('sparkles'), 'Show videos')),
       ),
@@ -822,14 +912,17 @@ async function home(token, { restore = false } = {}) {
 
   section.append(
     pageHead(
-      tab === 'following' ? 'From topics you follow' : warm ? 'Your feed' : 'Start here',
+      tab === 'following' ? (state.prefs.liveChannels.length ? 'From what you follow' : 'From topics you follow') : warm ? 'Your feed' : 'Start here',
       tab === 'following'
-        ? `${plural(state.prefs.followTopics.length, 'topic')} · manage them under Customize`
+        ? [state.prefs.followTopics.length ? plural(state.prefs.followTopics.length, 'topic') : null, state.prefs.liveChannels.length ? plural(state.prefs.liveChannels.length, 'YouTube channel') : null, 'manage them under Customize'].filter(Boolean).join(' · ')
         : warm
           ? `Tuned by ${plural(state.likes.length, 'like')}${state.dislikes.length ? ` and ${plural(state.dislikes.length, 'dislike')}` : ''}. Each card says why it’s here.`
           : 'HN classics, recent favourites and topics to explore. Like a few videos to tune this feed.',
       h('button', { type: 'button', class: 'pill primary', id: 'play-feed', onclick: () => startQueue(vidsOnPage().slice(0, 100), tab === 'following' ? 'Following' : 'Your feed') }, icon('play'), 'Play all'),
       playAllLink(vidsOnPage),
+      hasLiveSources() && (state.prefs.mix.live > 0 || tab === 'following')
+        ? h('button', { type: 'button', class: 'pill', id: 'refresh-live', title: 'Fetch new uploads from YouTube', onclick: () => ((liveEpoch++), (homeCache = null), route({ keepScroll: true, focus: '#refresh-live' })) }, icon('refresh'), 'Refresh')
+        : null,
     ),
   );
   const prefs = knownPrefs(areas ? new Set(areas.flatMap((a) => a.categories.map((c) => c.id))) : null);
@@ -846,14 +939,33 @@ async function home(token, { restore = false } = {}) {
   const mine = tab === 'foryou' ? myFeedPicks() : [];
   // My videos go in every `every`-th slot: weight 5 → every 2nd card, weight 1 → every 10th.
   const every = state.prefs.mix.mine > 0 ? Math.max(2, 12 - 2 * state.prefs.mix.mine) : Infinity;
+  // Live videos likewise. On "Following" they are part of what you follow, so they come often.
+  const liveWeight = tab === 'following' ? Math.max(4, state.prefs.mix.live) : state.prefs.mix.live;
+  const liveEvery = liveWeight > 0 ? Math.max(2, 12 - 2 * liveWeight) : Infinity;
+  const followingOnlyLive = tab === 'following' && !state.prefs.followTopics.length;
+  // Fetched once per Home; a failure leaves the rest of the feed working.
+  const livePromise = liveWeight > 0
+    ? liveFeedPicks().catch((err) => {
+        toast(`Couldn’t load new videos from YouTube (${err.message})`);
+        return { items: [], failed: [] };
+      })
+    : Promise.resolve({ items: [], failed: [] });
+  let live = null;
   let shown = 0;
+  const used = new Set(); // across pages, so no video gets two cards
   const key = homeKey() + location.search;
   const grid = infiniteGrid(
     section,
     async (offset) => {
       let page;
+      if (!live) {
+        live = await livePromise;
+        const bad = live.failed.filter((s) => s.kind === 'channel').map((s) => state.prefs.liveChannels.find((c) => c.id === s.id)?.name ?? s.id);
+        if (bad.length) toast(`Couldn’t load ${bad.slice(0, 2).join(', ')}${bad.length > 2 ? ` and ${bad.length - 2} more` : ''} from YouTube`);
+        live = live.items.filter((it) => !mine.some((m) => m.vid === it.vid));
+      }
       try {
-        page = await api('/api/feed', { ...profile, offset, n: 24 });
+        page = followingOnlyLive ? { items: [], next_offset: null } : await api('/api/feed', { ...profile, offset, n: 24 });
       } catch (err) {
         if (err.status === 400) err.message = `${err.message}. Check or reset your settings under Customize`;
         throw err;
@@ -863,12 +975,16 @@ async function home(token, { restore = false } = {}) {
         items.push(item);
         shown++;
         if (shown % every === 0 && mine.length) items.push(mine.shift());
+        if (shown % liveEvery === 0 && live.length) items.push(live.shift());
       }
-      if (page.next_offset === null) items.push(...mine.splice(0));
-      return { ...page, items, consumed: page.items.length };
+      if (page.next_offset === null) items.push(...live.splice(0), ...mine.splice(0));
+      const fresh = items.filter((x) => !used.has(x.vid) && used.add(x.vid));
+      return { ...page, items: fresh, consumed: page.items.length };
     },
     {
-      empty: Object.values(state.prefs.mix).every((w) => w === 0)
+      empty: followingOnlyLive
+        ? 'No new videos from the YouTube channels you follow match your settings.'
+        : Object.values(state.prefs.mix).every((w) => w === 0)
         ? 'Every feed source is turned off. Turn some back on in Customize feed.'
         : 'Nothing matches your feed settings. Loosen them in Customize feed, or clear your history.',
       token,
@@ -1293,12 +1409,18 @@ async function watchPage(token, vid) {
   // Videos added by URL are never in the collection (adding one that is opens it instead).
   const mine = state.custom.find((c) => c.vid === vid);
   if (mine) return customWatchPage(mine);
+  const live = state.live.get(vid);
+  if (live) return customWatchPage(live, { live: true });
   let d;
   try {
     d = await api(`/api/video${qs({ vid })}`);
   } catch (err) {
     if (err.status !== 404) throw err;
     if (!current(token)) return;
+    // Any other YouTube video (a live one this browser no longer remembers, a shared link) still plays.
+    const info = await api(`/api/oembed${qs({ vid })}`).catch(() => null);
+    if (!current(token)) return;
+    if (info && !info.in_collection) return customWatchPage({ vid, title: info.title, channel: info.channel, short: false, source: 'channel' }, { live: true });
     return notFound('This video is not in the collection. You can add any YouTube video under My videos.');
   }
   if (!current(token)) return;
@@ -1419,7 +1541,7 @@ function watchMoreButton({ channel, youtubeUrl }) {
 }
 
 /** Watch page for a video the viewer added: just the player and its YouTube title. */
-function customWatchPage(c) {
+function customWatchPage(c, { live = false } = {}) {
   document.title = `${c.title} · ${SITE}`;
   markSeen(c.vid);
   const player = h('div', { class: `player${c.short ? ' short' : ''}` });
@@ -1429,11 +1551,11 @@ function customWatchPage(c) {
     nextUp: () => {
       const next = queueNext(c.vid);
       if (!next) return null;
-      const known = state.custom.find((x) => x.vid === next);
+      const known = state.custom.find((x) => x.vid === next) ?? state.live.get(next);
       return { vid: next, title: known?.title ?? 'Next in your list' };
     },
   });
-  const remove = h('button', {
+  const remove = live ? addToMineButton(c) : h('button', {
     type: 'button',
     class: 'pill',
     id: 'remove-mine',
@@ -1458,12 +1580,53 @@ function customWatchPage(c) {
         h(
           'div',
           { class: 'owner' },
-          h('div', {}, h('b', {}, c.channel || 'Unknown channel'), h('p', { class: 'sub' }, `${c.short ? 'Short' : 'Video'} you added · not from Hacker News`)),
-          h('div', { class: 'actions' }, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
+          h(
+            'div',
+            {},
+            h('b', {}, c.channel || 'Unknown channel'),
+            h('p', { class: 'sub' }, live ? [c.short ? 'Short' : 'Video', c.views != null ? `${compact(c.views)} views` : null, c.published ? ago(c.published) : null, c.source === 'topic' ? `found on YouTube for “${c.via}”` : 'new on YouTube'].filter(Boolean).join(' · ') : `${c.short ? 'Short' : 'Video'} you added · not from Hacker News`),
+          ),
+          h('div', { class: 'actions' }, live && c.channelId ? followChannelButton({ id: c.channelId, name: c.channel }) : null, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
         ),
       ),
     ),
   );
+}
+
+/** Follow or unfollow a YouTube channel: its new uploads join Home. */
+function followChannelButton(ch) {
+  const btn = h('button', { type: 'button', class: 'pill', id: 'follow-channel' });
+  const render = () => {
+    const on = state.prefs.liveChannels.some((c) => c.id === ch.id);
+    btn.classList.toggle('on', on);
+    // the label says the state, so no aria-pressed (it would be announced twice)
+    btn.replaceChildren(icon(on ? 'check' : 'plus'), on ? 'Following channel' : 'Follow channel');
+  };
+  btn.addEventListener('click', () => {
+    const on = state.prefs.liveChannels.some((c) => c.id === ch.id);
+    if (!on && state.prefs.liveChannels.length >= LIVE_MAX_CHANNELS) return toast(`You can follow up to ${LIVE_MAX_CHANNELS} channels`);
+    state.prefs.liveChannels = on ? state.prefs.liveChannels.filter((c) => c.id !== ch.id) : [...state.prefs.liveChannels, { id: ch.id, name: ch.name || ch.id }];
+    savePrefs();
+    render();
+    toast(on ? `Unfollowed ${ch.name}` : `Following ${ch.name}: its new uploads join your Home feed`);
+  });
+  render();
+  return btn;
+}
+
+function addToMineButton(c) {
+  const btn = h('button', { type: 'button', class: 'pill', id: 'add-mine' });
+  const render = () => btn.replaceChildren(icon(state.custom.some((x) => x.vid === c.vid) ? 'check' : 'plus'), state.custom.some((x) => x.vid === c.vid) ? 'In My videos' : 'Add to My videos');
+  btn.addEventListener('click', () => {
+    if (state.custom.some((x) => x.vid === c.vid)) return navigate('/mine');
+    state.custom.push({ vid: c.vid, title: c.title, channel: c.channel, short: c.short, added: new Date().toISOString() });
+    state.custom = sanitizeCustom(state.custom);
+    saveCustom();
+    render();
+    toast('Added to My videos');
+  });
+  render();
+  return btn;
 }
 
 function refreshVoteButtons(vid) {
@@ -1509,7 +1672,7 @@ async function searchPage(token, q) {
 /** Cards for a list of ids in order: your own videos from this browser, the rest from the server. */
 async function resolveCards(vids, token) {
   const mine = new Map(state.custom.map((c) => [c.vid, c]));
-  const lookup = [...new Set(vids.filter((vid) => !mine.has(vid)))];
+  const lookup = [...new Set(vids.filter((vid) => !mine.has(vid) && !state.live.has(vid)))];
   const found = new Map();
   for (let i = 0; i < lookup.length; i += PROFILE_SEND) {
     const res = await api(`/api/docs${qs({ vids: lookup.slice(i, i + PROFILE_SEND).join(',') })}`);
@@ -1519,7 +1682,8 @@ async function resolveCards(vids, token) {
   return vids
     .map((vid) => {
       const c = mine.get(vid);
-      return c ? { vid, title: c.title, channel: c.channel, custom: true, short: c.short } : found.get(vid);
+      if (c) return { vid, title: c.title, channel: c.channel, custom: true, short: c.short };
+      return found.get(vid) ?? (state.live.has(vid) ? liveAsItem(state.live.get(vid)) : undefined);
     })
     .filter(Boolean);
 }
@@ -1767,6 +1931,71 @@ async function settingsPage(token) {
     chipList(p.muteChannels, (c) => c, (c) => changed(toggleChannel(c) ? null : 'Channel shown again'), 'No hidden channels. Use “Hide channel” on any video page.'),
   );
 
+  // Live from YouTube: channels (always) and topic searches (when the server has a key)
+  const liveTopicsOk = Boolean(config.live?.topics);
+  const channelInput = h('input', { type: 'text', id: 'live-channel-input', maxlength: 500, placeholder: 'Channel link, @handle, or a link to one of its videos', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'YouTube channel to follow' });
+  const channelForm = h(
+    'form',
+    { class: 'addform mt-2', id: 'live-channel-form' },
+    channelInput,
+    h('button', { type: 'submit', class: 'pill primary' }, icon('plus'), 'Follow'),
+  );
+  channelForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = channelInput.value.trim();
+    if (!q) return channelInput.focus();
+    if (p.liveChannels.length >= LIVE_MAX_CHANNELS) return toast(`You can follow up to ${LIVE_MAX_CHANNELS} channels`);
+    const submit = channelForm.querySelector('button');
+    submit.disabled = true;
+    try {
+      const ch = await api(`/api/live/resolve${qs({ q })}`);
+      if (p.liveChannels.some((c) => c.id === ch.channelId)) toast(`Already following ${ch.channel}`);
+      else {
+        p.liveChannels = [...p.liveChannels, { id: ch.channelId, name: ch.channel }];
+        changed(`Following ${ch.channel}`);
+      }
+      route({ keepScroll: true, focus: '#live-channel-input' });
+    } catch (err) {
+      toast(err.status === 400 ? 'Paste a YouTube channel link, a @handle or a link to one of its videos' : `Couldn’t find that channel (${err.message})`);
+      submit.disabled = false;
+      channelInput.focus();
+    }
+  });
+  const topicInput = h('input', { type: 'text', id: 'live-topic-input', placeholder: 'A search, like “rust compilers” or “f1 technical”', maxlength: 60, autocomplete: 'off', 'aria-label': 'YouTube search to follow', disabled: !liveTopicsOk });
+  const topicForm = h('form', { class: 'addform mt-2', id: 'live-topic-form' }, topicInput, h('button', { type: 'submit', class: 'pill primary', disabled: !liveTopicsOk }, icon('plus'), 'Add'));
+  topicForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const t = topicInput.value.trim().replace(/\s+/g, ' ').replace(/\|/g, ' ');
+    if (!t) return topicInput.focus();
+    if (p.liveTopics.length >= LIVE_MAX_TOPICS) return toast(`You can follow up to ${LIVE_MAX_TOPICS} searches`);
+    if (!p.liveTopics.some((x) => x.toLowerCase() === t.toLowerCase())) {
+      p.liveTopics = [...p.liveTopics, t];
+      changed(`Following “${t}” on YouTube`);
+    }
+    route({ keepScroll: true, focus: '#live-topic-input' });
+  });
+  const liveGroup = h(
+    'fieldset',
+    { class: 'group', id: 'live' },
+    h('legend', {}, 'Live from YouTube'),
+    h('p', { class: 'hint' }, 'Follow any YouTube channel or search. Home fetches their newest uploads from YouTube each time you open it, and mixes them in by the “Live from YouTube” weight above. Your format, channel and history settings apply to them too.'),
+    h('h3', {}, 'Channels'),
+    chipList(p.liveChannels, (c) => c.name, (c) => {
+      p.liveChannels = p.liveChannels.filter((x) => x.id !== c.id);
+      changed('Channel unfollowed');
+    }, 'Not following any YouTube channels yet. Paste one below, or use “Follow channel” on a live video.'),
+    channelForm,
+    h('h3', {}, 'Searches'),
+    liveTopicsOk || p.liveTopics.length
+      ? chipList(p.liveTopics, (t) => t, (t) => {
+          p.liveTopics = p.liveTopics.filter((x) => x !== t);
+          changed('Search removed');
+        }, 'No searches yet. Add one to get the newest YouTube videos about it.')
+      : null,
+    liveTopicsOk ? null : h('p', { class: 'hint', id: 'live-topics-off' }, 'Searching YouTube needs a YouTube Data API key on the server (YOUTUBE_API_KEY). Following channels works without one.'),
+    topicForm,
+  );
+
   // Display, backup, reset
   const frames = checkbox(state.frames, (on) => {
     state.frames = on;
@@ -1830,6 +2059,7 @@ async function settingsPage(token) {
       types,
       mix,
       topics,
+      liveGroup,
       channels,
       backup,
     ),
@@ -1838,7 +2068,7 @@ async function settingsPage(token) {
 
 const PROFILE_VERSION = 2; // 2 added lists
 function snapshotProfile() {
-  return structuredClone({ app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom, lists: state.lists, progress: state.progress });
+  return structuredClone({ app: 'customtube', version: PROFILE_VERSION, exported: new Date().toISOString(), likes: state.likes, dislikes: state.dislikes, later: state.later, seen: state.seen, prefs: state.prefs, custom: state.custom, lists: state.lists, progress: state.progress, live: [...state.live.values()] });
 }
 function exportProfile() {
   const data = snapshotProfile();
@@ -1858,6 +2088,8 @@ function importProfile(data) {
   state.seen = cleanIds(data.seen).slice(-200);
   state.prefs = sanitizePrefs(data.prefs);
   state.custom = sanitizeCustom(data.custom);
+  state.live = sanitizeLive(data.live);
+  store.set('live', [...state.live.values()]);
   state.lists = sanitizeLists(data.lists);
   state.progress = sanitizeProgress(data.progress);
   saveProgressStore();
@@ -2399,6 +2631,7 @@ addEventListener('storage', (e) => {
   if (key === 'likes' || key === 'dislikes' || key === 'seen' || key === 'later') state[key] = cleanIds(store.get(key, []));
   else if (key === 'prefs') state.prefs = sanitizePrefs(store.get('prefs', null));
   else if (key === 'custom') state.custom = sanitizeCustom(store.get('custom', []));
+  else if (key === 'live') state.live = sanitizeLive(store.get('live', []));
   else if (key === 'lists') state.lists = sanitizeLists(store.get('lists', []));
   else if (key === 'frames') state.frames = store.get('frames', true) !== false;
   else if (key === 'progress') state.progress = sanitizeProgress(store.get('progress', {}));

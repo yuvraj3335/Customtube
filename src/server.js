@@ -16,6 +16,7 @@ import { createEmbedder } from './embedder.js';
 import { createRateLimiter } from './ratelimit.js';
 import { LRUCache } from 'lru-cache';
 import { CONTENT_TYPES, DATES, DURATIONS, FILTER_KEYS, LEVELS, parseFilters, matchesFilters, sortOptions, sortVideos } from './filters.js';
+import { createYoutube, parseChannelInput } from './youtube.js';
 import { DEFAULT_MIX, FORMATS, LONG_MIN_SECONDS, MIX_SOURCES, SHORT_MAX_SECONDS, curationKey, formatOf, parseCuration } from './curation.js';
 import {
   HttpError,
@@ -38,6 +39,9 @@ const SITE_NAME = 'Custom Tube';
 const MAX_PROFILE_IDS = 200; // seen, docs lookups
 const MAX_VOTE_IDS = 500; // likes and dislikes: the client keeps up to 500 of each
 const MAX_QUERY = 200;
+const LIVE_MAX_CHANNELS = 30;
+const LIVE_MAX_TOPICS = 8;
+const LIVE_CHANNEL_RE = /^UC[A-Za-z0-9_-]{22}$/;
 const STATIC_TYPES = {
   '.js': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -317,10 +321,17 @@ export function createApp({
   // Everything else in the API is cheap, but not free: a generous per-client budget.
   apiLimiter = createRateLimiter({ capacity: 240, refillPerSecond: 40 }),
   fetchImpl = globalThis.fetch,
+  // Live videos from YouTube (channel feeds; topic searches with a Data API key).
+  youtube = null,
+  // A live feed fetches up to ~40 channel feeds the first time, then reads them from cache.
+  liveLimiter = createRateLimiter({ capacity: 20, refillPerSecond: 0.2 }),
+  // Each new topic search spends 101 of the server's 10,000 daily YouTube quota units.
+  topicLimiter = createRateLimiter({ capacity: 10, refillPerSecond: 1 / 60 }),
   maxConnections = 2000,
   log = console,
   now = () => Date.now(),
 }) {
+  const yt = youtube ?? createYoutube({ fetchImpl, log, now });
   const oembedCache = new LRUCache({ max: 2000 });
   const relatedCache = new LRUCache({ max: 2000 });
   const searchCache = new LRUCache({ max: 500 });
@@ -440,6 +451,7 @@ export function createApp({
           sort: sortOptions({ hasMeta: ds.hasMeta, search: false }),
           search_sort: sortOptions({ hasMeta: ds.hasMeta, search: true }),
         },
+        live: { channels: true, topics: yt.canSearch, max_channels: LIVE_MAX_CHANNELS, max_topics: LIVE_MAX_TOPICS },
         curation: {
           formats: FORMATS,
           formats_available: ds.hasMeta,
@@ -461,6 +473,72 @@ export function createApp({
       const limit = oembedLimiter.take(clientKey(req));
       if (!limit.ok) throw new HttpError(429, 'too many lookups, try again shortly', { 'retry-after': String(limit.retryAfter) });
       sendJson(req, res, 200, await lookupOembed(vid));
+    },
+
+    '/api/live': async (req, res, params) => {
+      assertKnownParams(params, ['channels', 'topics']);
+      assertNonEmpty(params, ['channels', 'topics']);
+      const channels = [...new Set((params.get('channels') ?? '').split(',').filter(Boolean))];
+      for (const c of channels) if (!LIVE_CHANNEL_RE.test(c)) throw badRequest('"channels" must be YouTube channel ids (UC…) separated by commas');
+      if (channels.length > LIVE_MAX_CHANNELS) throw badRequest(`at most ${LIVE_MAX_CHANNELS} channels`);
+      const topics = [...new Set((params.get('topics') ?? '').split('|').map((t) => t.trim().replace(/\s+/g, ' ')).filter(Boolean))];
+      for (const t of topics) if (t.length > 60 || /[\u0000-\u001f]/.test(t)) throw badRequest('each topic is at most 60 characters');
+      if (topics.length > LIVE_MAX_TOPICS) throw badRequest(`at most ${LIVE_MAX_TOPICS} topics, separated by |`);
+      if (!channels.length && !topics.length) throw badRequest('give "channels" or "topics"');
+      const who = clientKey(req);
+      // Each channel YouTube must be asked about counts, so made-up ids can't flood YouTube.
+      const uncached = channels.filter((id) => !yt.hasChannel(id)).length;
+      const limit = liveLimiter.take(who, 1 + uncached / 5);
+      if (!limit.ok) throw new HttpError(429, 'too many live refreshes, try again shortly', { 'retry-after': String(limit.retryAfter) });
+      const sources = [
+        ...channels.map((id) => ({ kind: 'channel', id, run: () => yt.channelUploads(id) })),
+        ...topics.map((q) => ({
+          kind: 'topic',
+          id: q,
+          run: () => {
+            if (!yt.canSearch) throw new HttpError(501, 'live topics need a YouTube Data API key on the server');
+            if (!yt.hasTopic(q)) {
+              const t = topicLimiter.take(who);
+              if (!t.ok) throw new HttpError(429, 'too many new topic searches, try again later');
+            }
+            return yt.searchTopic(q);
+          },
+        })),
+      ];
+      const settled = await Promise.allSettled(sources.map((src) => Promise.resolve().then(src.run)));
+      const lists = [];
+      const status = sources.map((src, i) => {
+        const r = settled[i];
+        if (r.status === 'rejected') {
+          if (!(r.reason instanceof HttpError)) log.error?.(`live ${src.kind} failed: ${r.reason?.message}`);
+          return { kind: src.kind, id: src.id, ok: false, error: r.reason instanceof HttpError ? r.reason.message : 'failed' };
+        }
+        const via = src.kind === 'channel' ? r.value.channel : src.id;
+        lists.push(r.value.items.map((it) => ({ ...it, source: src.kind, via, ...(src.kind === 'channel' ? { channelId: src.id } : {}) })));
+        return { kind: src.kind, id: src.id, ok: true, name: via, count: r.value.items.length };
+      });
+      // Round-robin across sources (each newest first), so one busy channel can't fill the feed.
+      const items = [];
+      const seenVids = new Set();
+      for (let i = 0; lists.some((l) => i < l.length); i++) {
+        for (const l of lists) {
+          const it = l[i];
+          if (!it || seenVids.has(it.vid)) continue;
+          seenVids.add(it.vid);
+          // Videos already in the collection come with their HN card from the regular feed.
+          if (!ds.byVid.has(it.vid)) items.push(it);
+        }
+      }
+      sendJson(req, res, 200, { items, sources: status }, { 'cache-control': 'private, max-age=60' });
+    },
+
+    '/api/live/resolve': async (req, res, params) => {
+      assertKnownParams(params, ['q']);
+      const target = parseChannelInput(params.get('q'));
+      if (!target) throw badRequest('paste a YouTube channel link, a @handle, a channel id (UC…) or a link to one of its videos');
+      const limit = oembedLimiter.take(clientKey(req));
+      if (!limit.ok) throw new HttpError(429, 'too many lookups, try again shortly', { 'retry-after': String(limit.retryAfter) });
+      sendJson(req, res, 200, await yt.resolveChannel(target));
     },
 
     '/api/stats': (req, res, params) => {
@@ -762,6 +840,9 @@ export function readConfig(env = process.env) {
     maxConnections: parseIntParam(env.MAX_CONNECTIONS ?? '', 'MAX_CONNECTIONS', { min: 1, max: 1_000_000, def: 2000 }),
     // TRUST_PROXY=N: N proxies of ours sit in front of the server (1 = a single reverse proxy).
     trustProxy: parseIntParam(env.TRUST_PROXY ?? '', 'TRUST_PROXY', { min: 0, max: 10, def: 0 }),
+    // A YouTube Data API key turns on live topic searches (channel feeds work without one).
+    youtubeApiKey: env.YOUTUBE_API_KEY?.trim() || null,
+    youtubeDailyBudget: parseIntParam(env.YOUTUBE_DAILY_QUOTA ?? '', 'YOUTUBE_DAILY_QUOTA', { min: 0, max: 1_000_000, def: 8000 }),
   };
 }
 
@@ -777,7 +858,9 @@ async function main() {
   for (const w of ds.warnings) console.warn(`data warning: ${w}`);
   const embedder = createEmbedder({ cacheDir: cfg.cacheDir, enabled: cfg.embedder });
   embedder.start();
-  const { server } = createApp({ ds, embedder, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy, maxConnections: cfg.maxConnections });
+  const youtube = createYoutube({ apiKey: cfg.youtubeApiKey, dailyBudget: cfg.youtubeDailyBudget });
+  console.info(`live YouTube: channel feeds on; topic search ${youtube.canSearch ? 'on' : 'off (set YOUTUBE_API_KEY to turn it on)'}`);
+  const { server } = createApp({ ds, embedder, youtube, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy, maxConnections: cfg.maxConnections });
   server.on('error', (err) => {
     console.error(err.code === 'EADDRINUSE' ? `Port ${cfg.port} is already in use. Set PORT to a free port.` : `Could not listen on ${cfg.host}:${cfg.port}: ${err.message}`);
     process.exit(1);

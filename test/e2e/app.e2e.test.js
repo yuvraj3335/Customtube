@@ -11,6 +11,7 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 import { loadDataset } from '../../src/data.js';
 import { createApp, readConfig } from '../../src/server.js';
+import { createYoutube } from '../../src/youtube.js';
 import { createEmbedder } from '../../src/embedder.js';
 import { createRateLimiter } from '../../src/ratelimit.js';
 import { fakeEmbedder, makeFixture } from '../helpers/fixture.js';
@@ -57,10 +58,22 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
       embedder = fakeEmbedder();
     }
     const fetchImpl = async () => Response.json({ title: 'My e2e Short', author_name: 'E2E Creator' });
+    // A YouTube channel the viewer can follow: its handle page and its uploads feed.
+    const LIVE_CH = 'UCe2ee2ee2ee2ee2ee2ee2ee';
+    const ytFetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/@e2echannel') return new Response(`<link rel="canonical" href="https://www.youtube.com/channel/${LIVE_CH}">`);
+      if (url.pathname === '/feeds/videos.xml' && url.searchParams.get('channel_id') === LIVE_CH)
+        return new Response(
+          `<feed><title>E2E Channel</title><entry><yt:videoId>liveE2Evid1</yt:videoId><title>Fresh upload from E2E</title><link rel="alternate" href="https://www.youtube.com/watch?v=liveE2Evid1"/><author><name>E2E Channel</name></author><published>${new Date(Date.now() - 3600_000).toISOString()}</published><media:statistics views="1234"/></entry></feed>`,
+        );
+      return new Response('', { status: 404 });
+    };
     ({ server } = createApp({
       ds,
       embedder,
       fetchImpl,
+      youtube: createYoutube({ fetchImpl: ytFetch, log: { error: console.error } }),
       log: { info() {}, error: console.error },
       searchLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }),
     }));
@@ -752,6 +765,39 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.ok(!(await page.locator('.palette-item .label').allTextContents()).includes('Search for “lin”'));
     await page.keyboard.press('Escape');
     await page.unroute('**/api/suggest?q=lin');
+  });
+
+  test('live: follow a YouTube channel in Customize, its new uploads join Home, follow state on the watch page', async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(base + '/settings#live');
+    assert.ok(await page.isDisabled('#live-topic-input'), 'topic search needs a key');
+    await page.fill('#live-channel-input', 'https://www.youtube.com/@e2echannel');
+    const resolved = page.waitForResponse((r) => r.url().includes('/api/live/resolve'));
+    await page.click('#live-channel-form button[type=submit]');
+    assert.equal((await resolved).status(), 200);
+    await page.waitForSelector('#live .chip.removable');
+    assert.match(await page.locator('#live .chip.removable').first().textContent(), /E2E Channel/);
+
+    const live = page.waitForResponse((r) => r.url().includes('/api/live?channels=UCe2ee2ee2ee2ee2ee2ee2ee'));
+    await page.goto(base + '/');
+    assert.equal((await live).status(), 200);
+    const card = page.locator('.card[data-vid="liveE2Evid1"]');
+    await card.waitFor();
+    assert.match(await card.textContent(), /New from E2E Channel/);
+    assert.match(await card.textContent(), /1K views · today/);
+    assert.equal(await page.locator('#refresh-live').count(), 1);
+
+    await card.locator('.card-link').click();
+    await page.waitForURL('**/watch/liveE2Evid1');
+    assert.match(await page.locator('.owner').textContent(), /new on YouTube/);
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Following channel');
+    await page.click('#follow-channel');
+    assert.equal((await page.textContent('#follow-channel')).trim(), 'Follow channel');
+    // the live video stays openable from history after unfollowing
+    await page.goto(base + '/history');
+    await page.locator('.card[data-vid="liveE2Evid1"]').waitFor();
+    await page.goto(base + '/settings#live');
+    assert.equal(await page.locator('#live .chip.removable').count(), 0);
   });
 
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {

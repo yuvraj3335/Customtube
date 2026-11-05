@@ -358,6 +358,7 @@
   .weight { @apply rounded-md bg-surface-2 py-0.5 text-center text-[13px] font-semibold tabular-nums; }
   .addform { @apply mb-1.5 flex max-w-2xl gap-2; }
   .addform input { @apply min-w-0 flex-1 rounded-full border border-line bg-surface px-4 py-2; }
+  .addform input:disabled, .addform button:disabled { @apply cursor-not-allowed opacity-50; }
   .title-input { @apply w-full max-w-lg rounded-lg border border-line bg-surface px-1.5 py-0.5 text-[22px] font-bold; }
 
   /* ---------- library and lists ---------- */

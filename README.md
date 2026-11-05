@@ -22,6 +22,13 @@ filter and mix from there.
   - a weight from 0 to 5 for every feed source (0 turns it off)
   - news-only videos and videos HN only cited (off by default)
   - export everything to a file and import it in another browser
+- **Live from YouTube.** Follow any YouTube channel (paste its link, its @handle, or a link to one
+  of its videos) and Home fetches its newest uploads from YouTube each time you open it, mixed in
+  by their own weight. Your format, hidden-channel and history settings apply to them too. With a
+  YouTube Data API key on the server you can also follow searches ("rust compilers", "f1
+  technical"), which bring in the newest matching videos from all of YouTube. Every live video page
+  has **Follow channel** and **Add to My videos**, and the **Following** tab shows your followed
+  topics and channels together.
 - **My videos** adds any YouTube video or Short by pasting its link. They join your feed, as often as
   you set.
 - **Every card's ⋯ menu**: Watch later, Save to list, Not interested (with undo), Hide this channel.
@@ -65,6 +72,8 @@ is ready, search uses keywords only.
 | `CUSTOMTUBE_DATA_DIR` | `data/raw/export` | The unzipped data export |
 | `CUSTOMTUBE_YOUTUBE_META` | `data/youtube_meta.jsonl` | Optional YouTube metadata (below) |
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
+| `YOUTUBE_API_KEY` | none | Turns on live YouTube searches in Customize (following channels works without it). See "Live from YouTube" below |
+| `YOUTUBE_DAILY_QUOTA` | `8000` | Quota units a day the server may spend (YouTube's free quota is 10,000) |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
 | `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` (checked at startup) |
 | `MAX_CONNECTIONS` | `2000` | Open connections the server accepts at once |
@@ -111,6 +120,18 @@ YOUTUBE_API_KEY=your-key npm run data:youtube
 Then restart the server. The script resumes where it stopped. YouTube's developer policies expect
 stored data to be refreshed now and then: delete `data/youtube_meta.jsonl` and run it again.
 
+### Live from YouTube
+
+- **Channels need nothing.** Their new uploads come from YouTube's public feed for each channel
+  (its latest 15 videos), cached on the server for 15 minutes. Finding a channel from a @handle or a
+  video link reads its public YouTube page, or uses the API when there is a key.
+- **Searches need a key** (the same free key as above, set as `YOUTUBE_API_KEY` when you start the
+  server). A new search costs 101 of the 10,000 free daily quota units and is cached for 6 hours,
+  so about 80 different searches a day fit. The server stops at `YOUTUBE_DAILY_QUOTA` units and says
+  so, and each visitor can start at most one new search a minute (after a burst of 10).
+- The server keeps only video ids, titles, channels, dates, lengths and view counts, in memory,
+  for a few hours. A viewer's followed channels and searches stay in their browser.
+
 ## How the feed works
 
 All the ranking happens on the server, per request, from what the browser sends: likes, dislikes,
@@ -153,6 +174,8 @@ suggestions also have server-wide budgets; over those: 503 with `Retry-After`. `
 | `/api/related` | `vid`, `n` (≤40, default 20) |
 | `/api/docs` | `vids` (≤200): cards for saved lists, in order; unknown or deleted ids are skipped |
 | `/api/suggest` | `q` (≤200 chars; a single character returns nothing): up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix); cached |
+| `/api/live` | `channels` (YouTube channel ids `UC…`, comma-separated, ≤30) and/or `topics` (searches separated by `\|`, ≤8, each ≤60 chars; need a key): the newest videos, taking turns between sources, plus a status per source. A source that fails is reported in `sources` and the rest still load. Rate limited per client |
+| `/api/live/resolve` | `q`: a channel link, @handle, channel id or video link → `{ channelId, channel }` |
 | `/api/oembed` | `vid`: title and channel of any YouTube video, for My videos (via YouTube's public oEmbed; rate limited) |
 | `/api/browse`, `/api/stats`, `/api/config` | none |
 

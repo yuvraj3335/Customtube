@@ -12,3 +12,6 @@ services:
       # set this to your https://<name>.onrender.com address (or custom domain) once you have it
       - key: PUBLIC_URL
         sync: false
+      # optional: a YouTube Data API key turns on live YouTube searches (see README)
+      - key: YOUTUBE_API_KEY
+        sync: false
