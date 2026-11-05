@@ -1565,7 +1565,6 @@ async function historyPage(token) {
 async function aboutPage(token) {
   const s = await api('/api/stats');
   if (!current(token)) return;
-  const ext = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
   view.replaceChildren(
     h(
       'article',
