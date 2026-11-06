@@ -5,7 +5,7 @@
 // The server fills in __VERSION__ (a hash of this deploy's files); a new deploy is a new cache.
 const VERSION = '__VERSION__';
 const CACHE = `customtube-${VERSION}`;
-const SHELL = ['/', `/static/app.js?v=${VERSION}`, `/static/styles.css?v=${VERSION}`, '/static/favicon.svg', '/static/icon.svg', '/static/icon-192.png', '/manifest.webmanifest'];
+const SHELL = ['/', `/static/app.js?v=${VERSION}`, `/static/styles.css?v=${VERSION}`, '/static/favicon.svg', '/static/icon.svg', '/static/icon-192.png', '/static/geist-latin.woff2', '/static/geist-latin-ext.woff2', '/static/geist-mono-latin.woff2', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

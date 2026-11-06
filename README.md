@@ -34,7 +34,7 @@ filter and mix from there.
   the channels you follow and the Shorts you added.
 - **Channels** shows the channels Hacker News recommends most, each followable in one click, and
   every channel has a page with its Shorts, its newest uploads and what HN recommends from it.
-  Followed channels are listed under **Subscriptions** in the sidebar, and any video page can
+  Followed channels are listed under **Subscriptions** in the You panel (the person icon in the top bar), and any video page can
   follow its channel.
 - **Dark by default**, with a light theme one click away.
 - **My videos** adds any YouTube video or Short by pasting its link. They join your feed, as often as

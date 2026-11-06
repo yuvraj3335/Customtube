@@ -812,7 +812,14 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.equal((await page.textContent('#follow-channel')).trim(), 'Follow');
     await page.click('#follow-channel');
     assert.equal((await page.textContent('#follow-channel')).trim(), 'Following');
+    // the "You" panel lists it under Subscriptions, and closes again on navigation
+    await page.click('#you');
+    // while it's open, page shortcuts are off: j must not select a card behind it
+    await page.keyboard.press('j');
+    assert.equal(await page.locator('.card.kbd').count(), 0, 'j selected a card behind the open panel');
     await page.locator('#side-extra a[href="/channel/UCe2ee2ee2ee2ee2ee2ee2ee"]').waitFor();
+    await page.click('#side-extra a[href="/channel/UCe2ee2ee2ee2ee2ee2ee2ee"]');
+    await page.waitForFunction(() => !document.querySelector('#side-extra').matches(':popover-open'));
 
     await page.goto(base + '/');
     const short = page.locator('.live-shelves .short-card[data-vid="liveE2Eshrt"]');
@@ -832,8 +839,15 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
 
   test('small screens have no horizontal scroll; no console errors anywhere', async () => {
     await page.setViewportSize({ width: 375, height: 800 });
-    for (const p of ['/', '/settings', '/topics', '/about', '/channels', '/shorts', '/channel/UCe2ee2ee2ee2ee2ee2ee2ee']) {
-      await page.goto(base + p);
+    for (const p of ['/', '/settings', '/topics', '/about', '/channels', '/shorts', '/channel/UCe2ee2ee2ee2ee2ee2ee2ee', '/library', 'first video']) {
+      if (p === 'first video') {
+        // a watch page: its one-row action strip must scroll inside itself, not widen the page
+        await page.goto(base + '/');
+        await page.goto(base + (await page.locator('.card-link').first().getAttribute('href')));
+        await page.waitForSelector('.owner .actions');
+      } else {
+        await page.goto(base + p);
+      }
       await page.waitForLoadState('networkidle');
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       assert.ok(overflow <= 0, `${p} overflows by ${overflow}px`);

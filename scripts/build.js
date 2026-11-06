@@ -58,17 +58,18 @@ function tailwind() {
  * public/licenses.txt: the licence text of every npm package bundled into public/app.js (and
  * Tailwind, whose CSS ships too), so the shipped client carries its third-party notices.
  */
-// The UI font, self-hosted (the CSP allows same-origin fonts only).
+// The UI fonts (Geist and Geist Mono), self-hosted (the CSP allows same-origin fonts only).
 const FONTS = [
-  ['@fontsource-variable/inter/files/inter-latin-wght-normal.woff2', 'inter-latin.woff2'],
-  ['@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2', 'inter-latin-ext.woff2'],
+  ['@fontsource-variable/geist/files/geist-latin-wght-normal.woff2', 'geist-latin.woff2'],
+  ['@fontsource-variable/geist/files/geist-latin-ext-wght-normal.woff2', 'geist-latin-ext.woff2'],
+  ['@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2', 'geist-mono-latin.woff2'],
 ];
 function copyFonts() {
   for (const [from, to] of FONTS) copyFileSync(path.join(root, 'node_modules', from), path.join(root, 'public', to));
 }
 
 function writeLicenses(metafile) {
-  const packages = new Set(['tailwindcss', '@fontsource-variable/inter']);
+  const packages = new Set(['tailwindcss', '@fontsource-variable/geist', '@fontsource-variable/geist-mono']);
   for (const input of Object.keys(metafile.inputs)) {
     const m = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(input);
     if (m) packages.add(m[1]);

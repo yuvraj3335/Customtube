@@ -596,7 +596,13 @@ for (const d of [$('#dialog'), $('#help')]) {
 function closeDialog() {
   for (const d of [$('#dialog'), $('#help')]) if (d.open) d.close();
 }
-const anyDialogOpen = () => $('#dialog').open || $('#help').open;
+// the "You" panel counts too: page shortcuts must not act on the page behind it
+const anyDialogOpen = () => $('#dialog').open || $('#help').open || youPanelOpen();
+function youPanelOpen() {
+  const panel = $('#side-extra');
+  // browsers without popovers can't parse :popover-open, and can't open the panel either
+  return typeof panel.showPopover === 'function' && panel.matches(':popover-open');
+}
 
 function saveToListDialog(vid, opener) {
   const d = $('#dialog');
@@ -2340,16 +2346,31 @@ function notFound(message = 'Page not found.') {
 
 // ---------- sidebar ----------
 
-/** Your lists and followed topics under the section nav (desktop only). */
+/** "You": the panel under the bar with your channels, topics and lists. */
 function renderSide() {
   const side = $('#side-extra');
   if (!side) return;
-  const sections = [];
-  if (state.lists.length) {
-    sections.push(
-      h('section', {}, h('h2', {}, 'Your lists'), state.lists.slice(-6).reverse().map((l) => h('a', { href: `/list/${l.id}` }, icon('queue'), h('span', { class: 'truncate' }, l.name)))),
-    );
-  }
+  const sections = [
+    h(
+      'section',
+      { class: 'side-shortcuts' },
+      h('a', { href: '/library' }, icon('library'), 'Library'),
+      h('a', { href: '/history' }, icon('history'), 'History'),
+      h('a', { href: '/mine' }, icon('plus'), 'Add a video'),
+      h('a', { href: '/settings' }, icon('sliders'), 'Customize'),
+    ),
+  ];
+  sections.push(
+    h(
+      'section',
+      {},
+      h('h2', {}, h('span', {}, 'Subscriptions'), h('a', { href: '/channels', class: 'side-h2-link' }, state.prefs.liveChannels.length ? 'All' : 'Find')),
+      state.prefs.liveChannels.length
+        ? state.prefs.liveChannels.slice(0, 12).map((c) => h('a', { href: `/channel/${c.id}` }, h('span', { class: 'ch-avatar xs', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('span', { class: 'truncate' }, c.name)))
+        : h('p', { class: 'side-empty' }, 'Follow a channel and its new uploads join Home.'),
+      state.prefs.liveChannels.length > 12 ? h('a', { href: '/channels', class: 'hint' }, `All ${state.prefs.liveChannels.length}`) : null,
+    ),
+  );
   if (state.prefs.followTopics.length) {
     if (!browseCache) {
       // names come with the topic list; draw again once it's here
@@ -2357,21 +2378,14 @@ function renderSide() {
     }
     const names = new Map((browseCache ?? []).flatMap((a) => a.categories.map((c) => [c.id, c.name])));
     sections.push(
-      h('section', {}, h('h2', {}, 'Following'), state.prefs.followTopics.slice(0, 10).map((id) => h('a', { href: `/c/${id}` }, h('span', { class: 'dot' }), h('span', { class: 'truncate' }, names.get(id) ?? id)))),
+      h('section', {}, h('h2', {}, 'Topics you follow'), state.prefs.followTopics.slice(0, 10).map((id) => h('a', { href: `/c/${id}` }, h('span', { class: 'dot' }), h('span', { class: 'truncate' }, names.get(id) ?? id)))),
     );
   }
-  if (state.prefs.liveChannels.length) {
+  if (state.lists.length) {
     sections.push(
-      h(
-        'section',
-        {},
-        h('h2', {}, h('a', { href: '/channels', class: 'side-h2-link' }, 'Subscriptions')),
-        state.prefs.liveChannels.slice(0, 12).map((c) => h('a', { href: `/channel/${c.id}` }, h('span', { class: 'ch-avatar xs', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('span', { class: 'truncate' }, c.name))),
-        state.prefs.liveChannels.length > 12 ? h('a', { href: '/channels', class: 'hint' }, `All ${state.prefs.liveChannels.length}`) : null,
-      ),
+      h('section', {}, h('h2', {}, 'Your lists'), state.lists.slice(-6).reverse().map((l) => h('a', { href: `/list/${l.id}` }, icon('queue'), h('span', { class: 'truncate' }, l.name)))),
     );
   }
-  sections.push(h('section', {}, h('a', { href: '/mine' }, icon('plus'), 'Add a video'), h('a', { href: '/history' }, icon('history'), 'History'), h('a', { href: '/about' }, icon('sparkles'), 'About')));
   side.replaceChildren(...sections);
 }
 
@@ -2740,6 +2754,7 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
   const { pathname } = location;
   closeMenu();
   closeDialog();
+  if (youPanelOpen()) $('#side-extra').hidePopover();
   renderSide();
   const section = ['/liked', '/later', '/history', '/mine', '/lists', '/library'].includes(pathname) || pathname.startsWith('/list/') ? '/library' : pathname.startsWith('/c/') || pathname.startsWith('/a/') || pathname === '/browse' ? '/topics' : pathname.startsWith('/channel/') ? '/channels' : pathname;
   for (const a of document.querySelectorAll('[data-nav]')) {
@@ -2851,7 +2866,10 @@ if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.da
 const isDark = () => document.documentElement.dataset.theme !== 'light';
 const syncThemeButton = () => {
   $('#theme').setAttribute('aria-pressed', String(isDark()));
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isDark() ? '#09090b' : '#ffffff');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isDark() ? '#0b0b0d' : '#fafafa');
+  // the button shows where it takes you
+  $('#theme').replaceChildren(icon(isDark() ? 'sun' : 'moon'));
+  $('#theme').setAttribute('aria-label', 'Dark theme');
 };
 syncThemeButton();
 $('#theme').addEventListener('click', () => {
