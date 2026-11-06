@@ -101,7 +101,7 @@ const SOURCE_LABELS = {
   corec: ['Same recommenders', 'What the HN people behind your likes also recommend'],
   following: ['Topics you follow', 'Best videos from followed topics'],
   mine: ['My videos', 'Videos and Shorts you added yourself'],
-  live: ['Live from YouTube', 'New uploads from channels and topics you follow on YouTube'],
+  live: ['Live from YouTube', 'New videos on YouTube from the channels, topics and searches you follow'],
 };
 const DEFAULT_PREFS = {
   formats: ['short', 'standard', 'long'],
@@ -111,7 +111,7 @@ const DEFAULT_PREFS = {
   muteChannels: [],
   mix: { classics: 2, recent: 2, explore: 1, gems: 1, similar: 4, corec: 2, following: 3, mine: 2, live: 3 },
   liveChannels: [], // { id: 'UC…', name } followed on YouTube
-  liveTopics: [], // free-text searches run on YouTube (needs a key on the server)
+  liveTopics: [], // free-text searches run on YouTube
   news: false,
   cited: false,
 };
@@ -143,6 +143,8 @@ function sanitizePrefs(raw) {
 const CHANNEL_ID_RE = /^UC[A-Za-z0-9_-]{22}$/;
 const LIVE_MAX_CHANNELS = 30;
 const LIVE_MAX_TOPICS = 8;
+// Searches sent to YouTube at once: your own searches, then the topics you follow (the server's cap).
+const LIVE_MAX_SEARCHES = 16;
 function sanitizeLiveChannels(raw) {
   if (!Array.isArray(raw)) return [];
   const out = new Map();
@@ -781,7 +783,9 @@ function currentFilters() {
 
 function filterBar({ search = false } = {}) {
   const active = currentFilters();
-  const go = (key, value) => navigate(location.pathname + qs({ ...active, [key]: value }));
+  // a search page's source ("in") stays when a filter changes
+  const source = new URLSearchParams(location.search).get('in');
+  const go = (key, value) => navigate(location.pathname + qs({ ...(source ? { in: source } : {}), ...active, [key]: value }));
   const select = (key, values) => {
     if (!values?.length) return null;
     const labels = OPTION_LABELS[key] || {};
@@ -823,7 +827,28 @@ let homeCache = null;
 const homeKey = () => JSON.stringify([state.likes, state.dislikes, state.prefs, state.custom.map((c) => c.vid), SEED, liveEpoch]);
 // Bumped by "Refresh" so Home fetches live videos again.
 let liveEpoch = 0;
-const hasLiveSources = () => state.prefs.liveChannels.length > 0 || (config.live?.topics && state.prefs.liveTopics.length > 0);
+const hasLiveSources = () => state.prefs.liveChannels.length > 0 || (config.live?.topics && (state.prefs.liveTopics.length > 0 || (config.live.topics_keyless && state.prefs.followTopics.length > 0)));
+
+/** What to ask YouTube for: followed channels, your own searches, and the names of the topics you follow. */
+async function liveParams() {
+  const p = state.prefs;
+  const params = {};
+  if (p.liveChannels.length) params.channels = p.liveChannels.map((c) => c.id).join(',');
+  if (!config.live?.topics) return params;
+  const searches = [...p.liveTopics];
+  // Collection topics are searched too, but only when that is free: with a Data API key each new
+  // search spends the server's shared daily quota.
+  if (p.followTopics.length && config.live.topics_keyless) {
+    const areas = await getBrowse().catch(() => null);
+    const names = new Map((areas ?? []).flatMap((a) => a.categories.map((c) => [c.id, c.name])));
+    for (const id of p.followTopics) {
+      const name = names.get(id)?.trim().replace(/\s+/g, ' ');
+      if (name && name.length <= 60 && !/[|\u0000-\u001f\u007f]/.test(name) && !searches.some((x) => x.toLowerCase() === name.toLowerCase())) searches.push(name);
+    }
+  }
+  if (searches.length) params.topics = searches.slice(0, LIVE_MAX_SEARCHES).join('|');
+  return params;
+}
 
 /**
  * New videos from the YouTube channels and topics the viewer follows, filtered by their settings:
@@ -832,9 +857,8 @@ const hasLiveSources = () => state.prefs.liveChannels.length > 0 || (config.live
 async function liveFeedPicks() {
   if (!hasLiveSources()) return { items: [], failed: [] };
   const p = state.prefs;
-  const params = {};
-  if (p.liveChannels.length) params.channels = p.liveChannels.map((c) => c.id).join(',');
-  if (config.live?.topics && p.liveTopics.length) params.topics = p.liveTopics.join('|');
+  const params = await liveParams();
+  if (!params.channels && !params.topics) return { items: [], failed: [] };
   const res = await api(`/api/live${qs(params)}`);
   const formats = new Set(p.formats);
   const formatOk = (it) => {
@@ -977,10 +1001,18 @@ async function home(token, { restore = false } = {}) {
           // filled even if the viewer has left: this Home is cached and comes back on Back
           const shorts = live.filter((it) => it.short);
           live = live.filter((it) => !it.short);
-          const fresh = tab === 'foryou' ? live.splice(0, 8) : [];
-          for (const it of [...shorts, ...fresh]) used.add(it.vid);
+          const take = (source) => {
+            if (tab !== 'foryou') return [];
+            const picked = live.filter((it) => it.source === source).slice(0, 8);
+            live = live.filter((it) => !picked.includes(it));
+            return picked;
+          };
+          const fresh = take('channel');
+          const found = take('topic');
+          for (const it of [...shorts, ...fresh, ...found]) used.add(it.vid);
           if (shorts.length) liveShelves.append(shortsShelf(shorts.slice(0, 20), { title: 'New Shorts' }));
           if (fresh.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'New from your channels'), h('a', { href: '/channels' }, 'Channels')), h('div', { class: 'row-scroll' }, fresh.map(card))));
+          if (found.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Fresh on YouTube in your topics'), h('a', { href: '/settings#live' }, 'Edit')), h('div', { class: 'row-scroll' }, found.map(card))));
         }
       }
       try {
@@ -1517,7 +1549,7 @@ async function watchPage(token, vid) {
             'div',
             { class: 'tags' },
             d.categories.map((c) => h('a', { class: 'chip', href: `/c/${c.id}` }, c.name)),
-            d.tags.map((t) => h('a', { class: 'tag', href: `/search/${encodeURIComponent(t)}` }, `#${t}`)),
+            d.tags.map((t) => h('a', { class: 'tag', href: `/search/${encodeURIComponent(t)}?in=hn` }, `#${t}`)),
           ),
         ),
         h('section', { class: 'comments' }, h('h2', {}, `What Hacker News said (${d.mentions.length})`), comments),
@@ -1643,10 +1675,54 @@ function renderLaterPill(btn, vid) {
   btn.setAttribute('aria-pressed', String(on));
 }
 
+// Search looks through all of YouTube by default; "Hacker News picks" searches the collection.
+const searchSource = () => (config.live?.search && new URLSearchParams(location.search).get('in') !== 'hn' ? 'youtube' : 'hn');
+
+function searchTabs(q, src) {
+  if (!config.live?.search) return null;
+  const base = `/search/${encodeURIComponent(q)}`;
+  return h(
+    'div',
+    { class: 'home-tabs', role: 'navigation', 'aria-label': 'Search in' },
+    [
+      ['youtube', 'All of YouTube', base],
+      ['hn', 'Hacker News picks', `${base}${qs({ in: 'hn', ...currentFilters() })}`],
+    ].map(([id, label, href]) => h('a', { class: `chip${src === id ? ' on' : ''}`, href, 'aria-current': src === id ? 'page' : null }, label)),
+  );
+}
+
+async function youtubeSearchPage(token, q) {
+  const section = h('section', {}, pageHead(`Results for “${q}”`, null, playAllLink(vidsOnPage)), searchTabs(q, 'youtube'));
+  view.replaceChildren(section);
+  // YouTube's own page token, passed back for the next page; nothing is kept on the server.
+  let next = null;
+  const shown = new Set();
+  await infiniteGrid(
+    section,
+    async () => {
+      // a page can bring nothing new (repeats, or only live streams): try up to 3 more
+      let res;
+      let fresh = [];
+      for (let tries = 0; tries < 4 && !fresh.length; tries++) {
+        res = await api(`/api/yt/search${qs({ q, ...(next ? { page: next } : {}) })}`);
+        next = res.next;
+        fresh = res.items.filter((it) => !shown.has(it.vid));
+        if (!next) break;
+      }
+      for (const it of fresh) shown.add(it.vid);
+      // Videos in the collection open their Hacker News page; the rest are remembered so theirs can play.
+      rememberLive(fresh.filter((it) => !it.in_collection).map((it) => ({ ...it, source: 'topic', via: q })));
+      return { items: fresh.map((it) => liveAsItem({ ...it, via: q })), consumed: fresh.length, next_offset: next && fresh.length ? 1 : null };
+    },
+    { empty: `YouTube has no videos for “${q}”.`, token },
+  ).first;
+}
+
 async function searchPage(token, q) {
   $('#q').value = q;
   document.title = `${q} - search · ${SITE}`;
-  const section = h('section', {}, pageHead(`Results for “${q}”`, null, playAllLink(vidsOnPage)), filterBar({ search: true }));
+  if (searchSource() === 'youtube') return youtubeSearchPage(token, q);
+  const section = h('section', {}, pageHead(`Results for “${q}”`, null, playAllLink(vidsOnPage)), searchTabs(q, 'hn'), filterBar({ search: true }));
   view.replaceChildren(section, h('p', { class: 'status' }, 'Searching…'));
   let res;
   try {
@@ -1976,7 +2052,7 @@ async function settingsPage(token) {
     'fieldset',
     { class: 'group', id: 'live' },
     h('legend', {}, 'Live from YouTube'),
-    h('p', { class: 'hint' }, 'Follow any YouTube channel or search. Home fetches their newest uploads from YouTube each time you open it, and mixes them in by the “Live from YouTube” weight above. Your format, channel and history settings apply to them too.'),
+    h('p', { class: 'hint' }, 'Follow any YouTube channel or search. Topics you follow above are searched on YouTube too. Home fetches the newest videos for all of them each time you open it, and mixes them in by the “Live from YouTube” weight above. Your format, channel and history settings apply to them too.'),
     h('h3', {}, 'Channels'),
     chipList(p.liveChannels, (c) => c.name, (c) => {
       p.liveChannels = p.liveChannels.filter((x) => x.id !== c.id);
@@ -1990,7 +2066,7 @@ async function settingsPage(token) {
           changed('Search removed');
         }, 'No searches yet. Add one to get the newest YouTube videos about it.')
       : null,
-    liveTopicsOk ? null : h('p', { class: 'hint', id: 'live-topics-off' }, 'Searching YouTube needs a YouTube Data API key on the server (YOUTUBE_API_KEY). Following channels works without one.'),
+    liveTopicsOk ? null : h('p', { class: 'hint', id: 'live-topics-off' }, 'This server has YouTube search turned off. Following channels still works.'),
     topicForm,
   );
 
@@ -2591,8 +2667,8 @@ async function shortsPage(token) {
   if (only || hasLiveSources()) {
     try {
       const p = state.prefs;
-      const q = only ? { channels: only } : { ...(p.liveChannels.length ? { channels: p.liveChannels.map((c) => c.id).join(',') } : {}), ...(config.live?.topics && p.liveTopics.length ? { topics: p.liveTopics.join('|') } : {}) };
-      const res = await api(`/api/live${qs(q)}`);
+      const q = only ? { channels: only } : await liveParams();
+      const res = q.channels || q.topics ? await api(`/api/live${qs(q)}`) : { items: [] };
       items = res.items.filter((it) => it.short && !p.muteChannels.includes(it.channel));
       rememberLive(items);
     } catch {
@@ -2855,7 +2931,9 @@ $('#search').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = $('#q').value.trim();
   $('#q').blur();
-  navigate(q ? `/search/${encodeURIComponent(q)}${qs(location.pathname.startsWith('/search/') ? currentFilters() : {})}` : '/');
+  // a new search stays on the tab (and filters) you searched from
+  const src = new URLSearchParams(location.search).get('in');
+  navigate(q ? `/search/${encodeURIComponent(q)}${qs(location.pathname.startsWith('/search/') ? { ...(src === 'hn' ? { in: 'hn' } : {}), ...currentFilters() } : {})}` : '/');
 });
 
 // ---------- theme, toast, shortcuts ----------

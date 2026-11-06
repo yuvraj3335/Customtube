@@ -17,6 +17,7 @@ import { createRateLimiter } from './ratelimit.js';
 import { LRUCache } from 'lru-cache';
 import { CONTENT_TYPES, DATES, DURATIONS, FILTER_KEYS, LEVELS, parseFilters, matchesFilters, sortOptions, sortVideos } from './filters.js';
 import { createYoutube, parseChannelInput } from './youtube.js';
+import { PAGE_TOKEN_RE } from './innertube.js';
 import { DEFAULT_MIX, FORMATS, LONG_MIN_SECONDS, MIX_SOURCES, SHORT_MAX_SECONDS, curationKey, formatOf, parseCuration } from './curation.js';
 import {
   HttpError,
@@ -40,7 +41,7 @@ const MAX_PROFILE_IDS = 200; // seen, docs lookups
 const MAX_VOTE_IDS = 500; // likes and dislikes: the client keeps up to 500 of each
 const MAX_QUERY = 200;
 const LIVE_MAX_CHANNELS = 30;
-const LIVE_MAX_TOPICS = 8;
+const LIVE_MAX_TOPICS = 16; // searches the viewer follows plus the collection topics they follow
 const LIVE_CHANNEL_RE = /^UC[A-Za-z0-9_-]{22}$/;
 const STATIC_TYPES = {
   '.js': 'application/javascript; charset=utf-8',
@@ -326,8 +327,11 @@ export function createApp({
   youtube = null,
   // A live feed fetches up to ~40 channel feeds the first time, then reads them from cache.
   liveLimiter = createRateLimiter({ capacity: 20, refillPerSecond: 0.2 }),
-  // Each new topic search spends 101 of the server's 10,000 daily YouTube quota units.
-  topicLimiter = createRateLimiter({ capacity: 10, refillPerSecond: 1 / 60 }),
+  // New topic searches asked of YouTube, per client (with a Data API key, the server's daily quota
+  // has its own server-wide budget in youtube.js).
+  topicLimiter = createRateLimiter({ capacity: 20, refillPerSecond: 1 / 15 }),
+  // Search-box pages from all of YouTube, per client.
+  ytSearchLimiter = createRateLimiter({ capacity: 20, refillPerSecond: 0.5 }),
   maxConnections = 2000,
   log = console,
   now = () => Date.now(),
@@ -469,7 +473,7 @@ export function createApp({
           sort: sortOptions({ hasMeta: ds.hasMeta, search: false }),
           search_sort: sortOptions({ hasMeta: ds.hasMeta, search: true }),
         },
-        live: { channels: true, topics: yt.canSearch, max_channels: LIVE_MAX_CHANNELS, max_topics: LIVE_MAX_TOPICS },
+        live: { channels: true, topics: yt.canSearch, search: true, topics_keyless: Boolean(yt.keylessTopics), max_channels: LIVE_MAX_CHANNELS, max_topics: LIVE_MAX_TOPICS },
         curation: {
           formats: FORMATS,
           formats_available: ds.hasMeta,
@@ -514,7 +518,6 @@ export function createApp({
           kind: 'topic',
           id: q,
           run: () => {
-            if (!yt.canSearch) throw new HttpError(501, 'live topics need a YouTube Data API key on the server');
             if (!yt.hasTopic(q)) {
               const t = topicLimiter.take(who);
               if (!t.ok) throw new HttpError(429, 'too many new topic searches, try again later');
@@ -548,6 +551,23 @@ export function createApp({
         }
       }
       sendJson(req, res, 200, { items, sources: status }, { 'cache-control': 'private, max-age=60' });
+    },
+
+    // Any video on YouTube, for the search box: one page at a time, `page` being the previous
+    // page's `next` token.
+    '/api/yt/search': async (req, res, params) => {
+      assertKnownParams(params, ['q', 'page']);
+      assertNonEmpty(params, ['q', 'page']);
+      const q = (params.get('q') ?? '').trim().replace(/\s+/g, ' ');
+      if (!q || q.length > MAX_QUERY || /[\u0000-\u001f\u007f]/.test(q)) throw badRequest(`"q" is 1 to ${MAX_QUERY} characters`);
+      const page = params.get('page');
+      if (page !== null && !PAGE_TOKEN_RE.test(page)) throw badRequest('"page" must be the "next" token of an earlier page');
+      if (!yt.hasPage(q, page)) {
+        const limit = ytSearchLimiter.take(clientKey(req));
+        if (!limit.ok) throw new HttpError(429, 'too many searches, try again shortly', { 'retry-after': String(limit.retryAfter) });
+      }
+      const out = await yt.searchVideos(q, { page });
+      sendJson(req, res, 200, { q, items: out.items.map((it) => ({ ...it, in_collection: ds.byVid.has(it.vid) })), next: out.next }, { 'cache-control': 'private, max-age=300' });
     },
 
     '/api/live/resolve': async (req, res, params) => {
@@ -897,7 +917,7 @@ async function main() {
   const embedder = createEmbedder({ cacheDir: cfg.cacheDir, enabled: cfg.embedder });
   embedder.start();
   const youtube = createYoutube({ apiKey: cfg.youtubeApiKey, dailyBudget: cfg.youtubeDailyBudget });
-  console.info(`live YouTube: channel feeds on; topic search ${youtube.canSearch ? 'on' : 'off (set YOUTUBE_API_KEY to turn it on)'}`);
+  console.info(`live YouTube: channel feeds and search on; followed topics via ${cfg.youtubeApiKey ? 'the Data API' : 'keyless search'}`);
   const { server } = createApp({ ds, embedder, youtube, publicUrl: cfg.publicUrl, trustProxy: cfg.trustProxy, maxConnections: cfg.maxConnections });
   server.on('error', (err) => {
     console.error(err.code === 'EADDRINUSE' ? `Port ${cfg.port} is already in use. Set PORT to a free port.` : `Could not listen on ${cfg.host}:${cfg.port}: ${err.message}`);

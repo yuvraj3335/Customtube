@@ -24,9 +24,9 @@ filter and mix from there.
   - export everything to a file and import it in another browser
 - **Live from YouTube.** Follow any YouTube channel (paste its link, its @handle, or a link to one
   of its videos) and Home fetches its newest uploads from YouTube each time you open it, mixed in
-  by their own weight. Your format, hidden-channel and history settings apply to them too. With a
-  YouTube Data API key on the server you can also follow searches ("rust compilers", "f1
-  technical"), which bring in the newest matching videos from all of YouTube. Every live video page
+  by their own weight. Your format, hidden-channel and history settings apply to them too. You can
+  also follow searches ("rust compilers", "f1 technical"), and (without a Data API key) every topic
+  you follow is searched on YouTube as well, so Home brings in this month's matching videos from all of YouTube. Every live video page
   has **Follow channel** and **Add to My videos**, and the **Following** tab shows your followed
   topics and channels together.
 - **Shorts** plays Shorts one per screen, like a phone: swipe or scroll (or ↑/↓, j/k) to the next,
@@ -80,8 +80,8 @@ is ready, search uses keywords only.
 | `CUSTOMTUBE_DATA_DIR` | `data/raw/export` | The unzipped data export |
 | `CUSTOMTUBE_YOUTUBE_META` | `data/youtube_meta.jsonl` | Optional YouTube metadata (below) |
 | `CUSTOMTUBE_EMBEDDER` | on | `off` skips the model; search is keyword-only |
-| `YOUTUBE_API_KEY` | none | Turns on live YouTube searches in Customize (following channels works without it). See "Live from YouTube" below |
-| `YOUTUBE_DAILY_QUOTA` | `8000` | Quota units a day the server may spend (YouTube's free quota is 10,000) |
+| `YOUTUBE_API_KEY` | none | Optional. Followed searches then use the official Data API instead of keyless search (the search box stays keyless). See "Live from YouTube" below |
+| `YOUTUBE_DAILY_QUOTA` | `8000` | With a key: quota units a day the server may spend (YouTube's free quota is 10,000) |
 | `CUSTOMTUBE_MODEL_CACHE` | `.cache/models` | Where the model is cached |
 | `PUBLIC_URL` | none | Public origin, for canonical link tags, e.g. `https://tube.example.com` (checked at startup) |
 | `MAX_CONNECTIONS` | `2000` | Open connections the server accepts at once |
@@ -133,12 +133,23 @@ stored data to be refreshed now and then: delete `data/youtube_meta.jsonl` and r
 - **Channels need nothing.** Their new uploads come from YouTube's public feed for each channel
   (its latest 15 videos), cached on the server for 15 minutes. Finding a channel from a @handle or a
   video link reads its public YouTube page, or uses the API when there is a key.
-- **Searches need a key** (the same free key as above, set as `YOUTUBE_API_KEY` when you start the
-  server). A new search costs 101 of the 10,000 free daily quota units and is cached for 6 hours,
-  so about 80 different searches a day fit. The server stops at `YOUTUBE_DAILY_QUOTA` units and says
-  so, and each visitor can start at most one new search a minute (after a burst of 10).
-- The server keeps only video ids, titles, channels, dates, lengths and view counts, in memory,
-  for a few hours. A viewer's followed channels and searches stay in their browser.
+- **Search covers all of YouTube, with no key.** The search box and followed topics ask YouTube's
+  own web client API (through the `youtubei.js` package), so there is no quota. Results come a
+  page at a time; the next page is YouTube's own continuation token, which the browser sends back, so
+  the server keeps no search state. This API is not YouTube's official one: it can change without
+  notice, and YouTube's terms prefer the Data API, so run it for yourself rather than at scale.
+- Keyless search can't tell whether a video allows embedding. For one that doesn't, YouTube's
+  player shows its own "Watch on YouTube" link.
+- **With a key** (the same free key as above, set as `YOUTUBE_API_KEY`), followed searches use the
+  official Data API instead, and only embeddable videos come back. A new search then costs 101 of
+  the 10,000 free daily quota units and is cached for 6 hours, so about 80 different searches a day
+  fit, and the server stops at `YOUTUBE_DAILY_QUOTA` units. To save that quota, topics you follow
+  from the collection are then not searched on YouTube. The search box stays keyless either way.
+- Each visitor can start 20 new topic searches at once, then one every 15 seconds, and 20 search
+  pages at once, then one every 2 seconds.
+- Nothing is written to disk. The server keeps only video ids, titles, channels, dates, lengths and
+  view counts, in memory, for at most a few hours. A viewer's followed channels, topics and searches
+  stay in their browser.
 
 ## How the feed works
 
@@ -181,8 +192,9 @@ suggestions also have server-wide budgets; over those: 503 with `Retry-After`. `
 | `/api/video` | `vid`: the card, HN stats and comments |
 | `/api/related` | `vid`, `n` (≤40, default 20) |
 | `/api/docs` | `vids` (≤200): cards for saved lists, in order; unknown or deleted ids are skipped |
+| `/api/yt/search` | `q` (≤200 chars) and optionally `page` (the `next` of the page before): about 20 videos from all of YouTube, each with `in_collection`, and `next` (null on the last page). Rate limited per client |
 | `/api/suggest` | `q` (≤200 chars; a single character returns nothing): up to 6 videos and 4 topics for as-you-type search (the last word may be a prefix); cached |
-| `/api/live` | `channels` (YouTube channel ids `UC…`, comma-separated, ≤30) and/or `topics` (searches separated by `\|`, ≤8, each ≤60 chars; need a key): the newest videos, taking turns between sources, plus a status per source. A source that fails is reported in `sources` and the rest still load. Rate limited per client |
+| `/api/live` | `channels` (YouTube channel ids `UC…`, comma-separated, ≤30) and/or `topics` (searches separated by `\|`, ≤16, each ≤60 chars): the newest videos, taking turns between sources, plus a status per source. A source that fails is reported in `sources` and the rest still load. Rate limited per client |
 | `/api/channels` | `n` (≤100, default 24), `offset`: the collection's channels, most HN recommendations first (summed over their videos), each with its three best videos |
 | `/api/channel` | `name` (≤200 chars), `n` (≤60): that channel's videos in the collection, best first |
 | `/api/live/resolve` | `q`: a channel link, @handle, channel id or video link → `{ channelId, channel }` |
@@ -218,6 +230,8 @@ src/
   curation.js    the viewer's feed settings: parsing, filtering, mix pattern
   search.js      semantic + keyword search, weak-match detection
   related.js     "Up next"
+  youtube.js     live YouTube: channel feeds, topic searches, channel lookups
+  innertube.js   keyless search of all of YouTube (youtubei.js), paged by YouTube's own tokens
   filters.js     list/search filters and sorts
   embedder.js    query embeddings with transformers.js (bge-small-en-v1.5, CLS pooling)
   npy.js, rng.js, vec.js, ratelimit.js, http.js

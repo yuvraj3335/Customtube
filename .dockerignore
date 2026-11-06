@@ -1,14 +1,10 @@
 node_modules
 data
-.cache
 public/app.js
 public/styles.css
 public/licenses.txt
-public/inter-latin.woff2
-public/inter-latin-ext.woff2
+public/*.woff2
 test-results
-.git
-.claude
 *.log
-.env
-.DS_Store
+# Dotfiles and dot-folders: git, caches, secrets and local editor or tool settings.
+.*

@@ -69,11 +69,21 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
         );
       return new Response('', { status: 404 });
     };
+    // All of YouTube, as the keyless search returns it: two pages per search.
+    const webSearch = {
+      async search(q, { page = null, within = null } = {}) {
+        const n = page ? 2 : 1;
+        // each query (and followed topics, which ask for recent videos) finds its own videos
+        const tag = [...q].reduce((x, c) => (x * 31 + c.charCodeAt(0)) >>> 0, 7).toString(36).padStart(7, '0').slice(-7);
+        const items = [0, 1].map((i) => ({ vid: `${within ? 't' : 'w'}${tag}${n}${i}x`, title: `${q} on YouTube, part ${n}.${i}`, channel: 'Web Channel', channelId: 'UCwebwebwebwebwebwebwebw', published: new Date(Date.now() - 86_400_000).toISOString(), duration_s: 420, views: 4200, short: false }));
+        return { items, next: page ? null : 'NEXT_PAGE_TOKEN_e2e_000' };
+      },
+    };
     ({ server } = createApp({
       ds,
       embedder,
       fetchImpl,
-      youtube: createYoutube({ fetchImpl: ytFetch, log: { error: console.error } }),
+      youtube: createYoutube({ fetchImpl: ytFetch, innertube: webSearch, log: { error: console.error } }),
       log: { info() {}, error: console.error },
       searchLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }),
     }));
@@ -167,11 +177,30 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.evaluate((s) => localStorage.setItem('customtube:likes', s), saved);
   });
 
+  test('search covers all of YouTube, page after page, and its videos play', async () => {
+    const asked = [];
+    const onResponse = (r) => r.url().includes('/api/yt/search') && asked.push([new URL(r.url()).searchParams.get('page'), r.status()]);
+    page.on('response', onResponse);
+    await page.fill('#q', 'zig compilers');
+    await page.press('#q', 'Enter');
+    await page.waitForSelector('.home-tabs .chip.on:has-text("All of YouTube")');
+    // the second page loads by itself (the grid is short), with YouTube's token sent back
+    await page.waitForSelector('.card-title:has-text("zig compilers on YouTube, part 2.1")');
+    page.off('response', onResponse);
+    assert.deepEqual(asked, [[null, 200], ['NEXT_PAGE_TOKEN_e2e_000', 200]]);
+    assert.equal(await page.locator('.grid .card').count(), 4);
+    await page.click('.card-title:has-text("part 1.0")');
+    await page.waitForSelector('h1:has-text("zig compilers on YouTube, part 1.0")');
+    await page.goBack();
+  });
+
   test('semantic search finds a topic and filters apply', async () => {
     const q = REAL ? 'distributed systems' : 'physics';
     await page.fill('#q', q);
-    const res = page.waitForResponse((r) => r.url().includes('/api/search'));
     await page.press('#q', 'Enter');
+    await page.waitForSelector('.home-tabs a:has-text("Hacker News picks")');
+    const res = page.waitForResponse((r) => r.url().includes('/api/search'));
+    await page.click('.home-tabs a:has-text("Hacker News picks")');
     const body = await (await res).json();
     assert.equal(body.mode, 'semantic');
     assert.equal(body.weak, false);
@@ -184,6 +213,14 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     const fb = await (await filtered).json();
     assert.ok(fb.items.every((x) => x.content_type === 'lecture'));
     assert.match(page.url(), /type=lecture/);
+    assert.match(page.url(), /in=hn/, 'a filter keeps the Hacker News tab');
+    // a new search from this tab stays on it, filters too
+    await page.fill('#q', 'compilers');
+    await page.press('#q', 'Enter');
+    await page.waitForURL(/\/search\/compilers\?/);
+    assert.match(page.url(), /in=hn/);
+    assert.match(page.url(), /type=lecture/);
+    await page.waitForSelector('.home-tabs .chip.on:has-text("Hacker News picks")');
   });
 
   test('customize: kinds, mix and muted topics change the feed request', async () => {
@@ -770,7 +807,10 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
   test('live: follow a YouTube channel in Customize, its new uploads join Home, follow state on the watch page', async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(base + '/settings#live');
-    assert.ok(await page.isDisabled('#live-topic-input'), 'topic search needs a key');
+    assert.ok(!(await page.isDisabled('#live-topic-input')), 'following a search needs no key');
+    await page.fill('#live-topic-input', 'e2e search');
+    await page.click('#live-topic-form button[type=submit]');
+    await page.waitForSelector('#live .chip.removable:has-text("e2e search")');
     await page.fill('#live-channel-input', 'https://www.youtube.com/@e2echannel');
     const resolved = page.waitForResponse((r) => r.url().includes('/api/live/resolve'));
     await page.click('#live-channel-form button[type=submit]');
@@ -786,6 +826,9 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.match(await card.textContent(), /New from E2E Channel/);
     assert.match(await card.textContent(), /1K views · today/);
     assert.equal(await page.locator('#refresh-live').count(), 1);
+    // the followed search brings this month's videos from all of YouTube in a shelf of their own
+    const found = page.locator('.shelf', { has: page.locator('h2:has-text("Fresh on YouTube in your topics")') });
+    await found.locator('.card-title:has-text("e2e search on YouTube, part 1.0")').waitFor();
 
     await card.locator('.card-link').click();
     await page.waitForURL('**/watch/liveE2Evid1');
@@ -797,6 +840,8 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.goto(base + '/history');
     await page.locator('.card[data-vid="liveE2Evid1"]').waitFor();
     await page.goto(base + '/settings#live');
+    await page.click('#live .chip.removable:has-text("e2e search")');
+    await page.waitForSelector('#live .chip.removable:has-text("e2e search")', { state: 'detached' });
     assert.equal(await page.locator('#live .chip.removable').count(), 0);
   });
 

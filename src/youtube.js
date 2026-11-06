@@ -2,17 +2,20 @@
 //
 // - Channel uploads come from YouTube's public RSS feed for a channel
 //   (https://www.youtube.com/feeds/videos.xml?channel_id=UC…): no key, no quota, ~15 latest.
-// - Topic searches, channel lookups and video details use the YouTube Data API v3 and need a key
-//   (YOUTUBE_API_KEY). The free quota is 10,000 units a day: a search costs 100, a lookup 1.
-//   Everything is cached, and a daily budget stops before the quota runs out.
+// - Searches (the search box and followed topics) go to YouTube's own web client API without a key
+//   (src/innertube.js), so all of YouTube is searchable with no quota. With a YouTube Data API key
+//   (YOUTUBE_API_KEY), followed topics use the official API instead: its free quota is 10,000
+//   units a day, a search costs 100, and a daily budget stops before the quota runs out.
+// - Channel lookups use the Data API with a key, else the public channel page.
 //
-// Only video ids, titles, channels, dates, durations and view counts are kept, in memory, for
-// at most a few hours (YouTube's developer policies expect API data to be refreshed).
+// Nothing is written to disk. Video ids, titles, channels, dates, durations and view counts are
+// kept in memory for at most a few hours, so repeated asks don't go to YouTube again.
 
 import { LRUCache } from "lru-cache";
 import { HttpError, VID_RE } from "./http.js";
 import { parseIsoDuration } from "./data.js";
 import { createRateLimiter } from "./ratelimit.js";
+import { createInnertube } from "./innertube.js";
 
 const API = "https://www.googleapis.com/youtube/v3";
 const CHANNEL_ID_RE = /^UC[A-Za-z0-9_-]{22}$/;
@@ -104,10 +107,11 @@ export function parseChannelFeed(xml) {
 }
 
 /**
- * @param {{ apiKey?: string|null, fetchImpl?: typeof fetch, dailyBudget?: number, log?: Console, now?: () => number }} opts
+ * @param {{ apiKey?: string|null, fetchImpl?: typeof fetch, innertube?: ReturnType<typeof createInnertube>|null, dailyBudget?: number, log?: Console, now?: () => number }} opts
  */
 export function createYoutube({
   apiKey = null,
+  innertube = null,
   fetchImpl = globalThis.fetch,
   dailyBudget = 8000,
   log = console,
@@ -115,6 +119,10 @@ export function createYoutube({
 } = {}) {
   const feeds = new LRUCache({ max: 2000, ttl: 15 * 60_000 }); // channel RSS, 15 min
   const searches = new LRUCache({ max: 1000, ttl: 6 * 60 * 60_000 }); // topic searches, 6 h
+  // Search-box pages, 30 min. Keyless topic searches are cheap, so they stay fresh for 1 h.
+  const pages = new LRUCache({ max: 2000, ttl: 30 * 60_000 });
+  const keylessTtl = 60 * 60_000;
+  const web = innertube ?? createInnertube({ fetchImpl, log, now });
   const channels = new LRUCache({ max: 5000, ttl: 24 * 60 * 60_000 }); // handle/video -> channel, 1 day
   // Channels YouTube has no feed for, so made-up ids don't cost a request each time.
   const missing = new LRUCache({ max: 20_000, ttl: 15 * 60_000 });
@@ -161,7 +169,7 @@ export function createYoutube({
     return p;
   };
 
-  async function get(url, what, { maxBytes = 2_000_000 } = {}) {
+  function takeUpstream() {
     const take = upstream.take("all");
     if (!take.ok)
       throw new HttpError(
@@ -169,6 +177,10 @@ export function createYoutube({
         "too many YouTube requests right now, try again shortly",
         { "retry-after": String(take.retryAfter) },
       );
+  }
+
+  async function get(url, what, { maxBytes = 2_000_000 } = {}) {
+    takeUpstream();
     const accept =
       what === "feed"
         ? "application/atom+xml"
@@ -249,7 +261,8 @@ export function createYoutube({
   }
 
   return {
-    canSearch: Boolean(apiKey),
+    canSearch: true,
+    keylessTopics: !apiKey,
     hasTopic: (q, order = "date") =>
       searches.has(`${order}\u0000${q.toLowerCase()}`),
     hasChannel: (id) => feeds.has(id) || missing.has(id),
@@ -288,17 +301,32 @@ export function createYoutube({
       });
     },
 
-    /** Fresh videos for a search phrase (101 units: search + details), embeddable only. */
+    /**
+     * Fresh videos for a search phrase. With a key: the Data API (101 units: search + details),
+     * embeddable videos only. Without one: keyless search, which can't tell whether a video allows
+     * embedding (YouTube's own player then shows "Watch on YouTube").
+     */
     async searchTopic(q, { order = "date" } = {}) {
       const key = `${order}\u0000${q.toLowerCase()}`;
       const hit = searches.get(key);
       if (hit) return hit;
       if (inflight.has(key)) return inflight.get(key);
-      if (!apiKey)
-        throw new HttpError(
-          501,
-          "live topics need a YouTube Data API key on the server (YOUTUBE_API_KEY, see README)",
-        );
+      if (!apiKey) {
+        takeUpstream();
+        return shared(key, async () => {
+          // Fresh videos first: this month's, or this year's for a quiet topic.
+          let { items } = await web.search(q, {
+            within: order === "date" ? "month" : null,
+          });
+          if (order === "date" && items.length < 6) {
+            takeUpstream();
+            ({ items } = await web.search(q, { within: "year" }));
+          }
+          const out = { q, items };
+          searches.set(key, out, { ttl: keylessTtl });
+          return out;
+        });
+      }
       // Check the whole cost first, so a search is never paid for and then left without details.
       charge(COST.search + COST.videos, { check: true });
       const slot = newSearches.take("all");
@@ -365,6 +393,26 @@ export function createYoutube({
         return out;
       });
     },
+
+    /**
+     * Any videos on YouTube for what a viewer typed in the search box, one page at a time. `page`
+     * is the `next` token of the page before (YouTube's own, passed through). No key, no quota.
+     */
+    async searchVideos(q, { page = null } = {}) {
+      // a later page is YouTube's token alone (it carries the query); the first page is the query
+      const key = page ? `p\u0000${page}` : `q\u0000${q.toLowerCase()}`;
+      const hit = pages.get(key);
+      if (hit) return hit;
+      if (!inflight.has(`page:${key}`)) takeUpstream();
+      return shared(`page:${key}`, async () => {
+        const out = await web.search(q, { page });
+        pages.set(key, out);
+        return out;
+      });
+    },
+
+    hasPage: (q, page = null) =>
+      pages.has(page ? `p\u0000${page}` : `q\u0000${q.toLowerCase()}`),
 
     /**
      * The channel behind a channel id, a @handle or a video id. With a key this uses the Data API

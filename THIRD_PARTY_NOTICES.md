@@ -21,6 +21,7 @@ The full licence texts are generated at build time into `public/licenses.txt` (s
 | @huggingface/transformers | Apache-2.0 | Query embeddings. Pulls in `onnxruntime-node` (MIT) and `sharp` (Apache-2.0), whose prebuilt `@img/sharp-libvips-*` binaries are **LGPL-3.0-or-later**: if you distribute `node_modules` or a container image, keep the libvips licence and allow relinking (shipping the unmodified npm package satisfies this in practice). |
 | lru-cache | BlueOak-1.0.0 | Keep its licence text or a link with redistributions. |
 | @petamoriken/float16 | MIT | |
+| youtubei.js | MIT | Keyless YouTube search. Pulls in `@bufbuild/protobuf` (Apache-2.0 AND BSD-3-Clause), `fflate` (MIT) and `meriyah` (ISC). |
 
 ## Build and development only (not shipped)
 

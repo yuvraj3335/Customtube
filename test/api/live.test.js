@@ -1,4 +1,5 @@
-// Live videos from YouTube: channel feeds (no key), topic searches (Data API key), channel lookup.
+// Live videos from YouTube: channel feeds, topic searches (keyless or Data API key), search-box
+// pages from all of YouTube, channel lookup.
 // YouTube is stubbed: every request the code makes must match a stub, or the test fails.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,6 +8,8 @@ import { loadDataset } from '../../src/data.js';
 import { createApp } from '../../src/server.js';
 import { createRateLimiter } from '../../src/ratelimit.js';
 import { channelIdFromPage, createYoutube, parseChannelFeed, parseChannelInput } from '../../src/youtube.js';
+import { createInnertube, relativeToIso, videoFromNode } from '../../src/innertube.js';
+import { HttpError } from '../../src/http.js';
 import { fakeEmbedder, makeFixture, vidOf } from '../helpers/fixture.js';
 
 const quiet = { info() {}, error() {} };
@@ -80,6 +83,67 @@ function stubYoutube() {
   };
   return { calls, fetchImpl };
 }
+
+// YouTube's web client API, faked at the boundary the app uses: search(q, { within, page }).
+const PAGE2 = 'TOKEN_page_two_0123456789';
+function fakeWeb({ quiet: few = [] } = {}) {
+  const calls = [];
+  const video = (vid, extra = {}) => ({ vid, title: `About ${vid}`, channel: 'Gamma', channelId: 'UCgggggggggggggggggggggg', published: '2026-11-01T00:00:00.000Z', duration_s: 600, views: 10, short: false, ...extra });
+  return {
+    calls,
+    async search(q, opts = {}) {
+      calls.push([q, opts]);
+      if (q === 'broken') throw new HttpError(502, 'YouTube search failed, try again');
+      if (few.includes(q) && opts.within === 'month') return { items: [video('fewMonth001')], next: null };
+      if (opts.page === PAGE2) return { items: [video('webVideo002'), video('webShort001', { duration_s: 40, short: true })], next: null };
+      // a recent-only topic search finds a few more
+      const fill = opts.within ? Array.from({ length: 4 }, (_, i) => video(`webFill000${i}`)) : [];
+      return { items: [video(vidOf(0, 0)), video('webVideo001'), ...fill], next: PAGE2 };
+    },
+  };
+}
+
+describe('keyless YouTube search', () => {
+  test('relative upload times become dates', () => {
+    const now = Date.parse('2026-11-06T00:00:00Z');
+    assert.equal(relativeToIso('3 days ago', now), '2026-11-03T00:00:00.000Z');
+    assert.equal(relativeToIso('Streamed 1 hour ago', now), '2026-11-05T23:00:00.000Z');
+    assert.equal(relativeToIso('2 weeks ago', now), '2026-10-23T00:00:00.000Z');
+    assert.equal(relativeToIso('', now), null);
+    assert.equal(relativeToIso('Premieres soon', now), null);
+    assert.equal(relativeToIso('99999999999 years ago', now), null);
+  });
+
+  test('a search result becomes a live item; live streams, premieres and odd ids are dropped', () => {
+    const now = Date.parse('2026-11-06T00:00:00Z');
+    const node = (extra) => ({ video_id: 'abcdefghijk', title: { toString: () => 'A talk' }, author: { name: 'Gamma', id: 'UCgggggggggggggggggggggg' }, duration: { seconds: 75 }, view_count: { toString: () => '1,234 views' }, published: { toString: () => '1 day ago' }, ...extra });
+    assert.deepEqual(videoFromNode(node(), now), { vid: 'abcdefghijk', title: 'A talk', channel: 'Gamma', channelId: 'UCgggggggggggggggggggggg', published: '2026-11-05T00:00:00.000Z', duration_s: 75, views: 1234, short: true });
+    assert.equal(videoFromNode(node({ is_live: true }), now), null);
+    assert.equal(videoFromNode(node({ is_upcoming: true }), now), null);
+    assert.equal(videoFromNode(node({ duration: { seconds: NaN } }), now), null);
+    assert.equal(videoFromNode(node({ video_id: 'bad' }), now), null);
+    assert.equal(videoFromNode(node({ author: { name: 'x', id: 'not-a-channel' } }), now).channelId, null);
+  });
+
+  test('a forged page token never reaches YouTube; a YouTube failure is a 502, logged', async () => {
+    let created = 0;
+    const errors = [];
+    const web = createInnertube({
+      create: async () => {
+        created++;
+        throw new Error('network down');
+      },
+      log: { error: (m) => errors.push(m) },
+    });
+    await assert.rejects(web.search('x', { page: 'not a token!' }), (err) => err.status === 400);
+    assert.equal(created, 0);
+    await assert.rejects(web.search('x'), (err) => err.status === 502);
+    // a failed start isn't kept: the next search tries again
+    await assert.rejects(web.search('x'), (err) => err.status === 502);
+    assert.equal(created, 2);
+    assert.match(errors[0], /network down/);
+  });
+});
 
 describe('parsing YouTube answers', () => {
   test('a channel feed becomes entries, with Shorts, views and decoded text', () => {
@@ -183,15 +247,16 @@ describe('/api/live', () => {
   after(() => rmSync(fx.dir, { recursive: true, force: true }));
   const open = (opts = {}) => {
     const stub = stubYoutube();
-    const youtube = createYoutube({ apiKey: opts.key ?? null, fetchImpl: stub.fetchImpl, log: quiet });
-    return start({ ds, embedder: fakeEmbedder(), youtube, liveLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }), oembedLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }), ...opts.app }).then((app) => ({ app, stub }));
+    const web = fakeWeb(opts.web);
+    const youtube = createYoutube({ apiKey: opts.key ?? null, fetchImpl: stub.fetchImpl, innertube: web, log: quiet });
+    return start({ ds, embedder: fakeEmbedder(), youtube, liveLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }), oembedLimiter: createRateLimiter({ capacity: 1000, refillPerSecond: 1000 }), ...opts.app }).then((app) => ({ app, stub, web }));
   };
 
   test('channel feeds work without a key, round-robin across channels, newest first, cached', async () => {
     const { app, stub } = await open();
     try {
       const cfg = await app.get('/api/config');
-      assert.deepEqual(cfg.body.live, { channels: true, topics: false, max_channels: 30, max_topics: 8 });
+      assert.deepEqual(cfg.body.live, { channels: true, topics: true, search: true, topics_keyless: true, max_channels: 30, max_topics: 16 });
       const { status, body, headers } = await app.get(`/api/live?channels=${CH_A},${CH_B}`);
       assert.equal(status, 200);
       assert.equal(headers.get('cache-control'), 'private, max-age=60');
@@ -213,13 +278,13 @@ describe('/api/live', () => {
   test('a failing source is reported, the rest still load', async () => {
     const { app } = await open();
     try {
-      const { status, body } = await app.get(`/api/live?channels=${CH_GONE},${CH_A}&topics=rust`);
+      const { status, body } = await app.get(`/api/live?channels=${CH_GONE},${CH_A}&topics=broken`);
       assert.equal(status, 200);
       assert.deepEqual(body.items.map((i) => i.vid), ['alphaShort1', 'alphaLong01', 'alphaOld001']);
       assert.deepEqual(body.sources.map((s) => [s.id, s.ok, s.error ?? null]), [
         [CH_GONE, false, 'YouTube has no such channel or video'],
         [CH_A, true, null],
-        ['rust', false, 'live topics need a YouTube Data API key on the server'],
+        ['broken', false, 'YouTube search failed, try again'],
       ]);
     } finally {
       await app.close();
@@ -230,6 +295,7 @@ describe('/api/live', () => {
     const { app, stub } = await open({ key: 'test-key', app: { topicLimiter: createRateLimiter({ capacity: 1, refillPerSecond: 0.0001 }) } });
     try {
       assert.equal((await app.get('/api/config')).body.live.topics, true);
+      assert.equal((await app.get('/api/config')).body.live.topics_keyless, false, 'collection topics are not searched on a quota');
       const { body } = await app.get('/api/live?topics=Rust');
       assert.deepEqual(
         body.items.map((i) => [i.vid, i.title, i.duration_s, i.short, i.via]),
@@ -251,10 +317,68 @@ describe('/api/live', () => {
     }
   });
 
+  test('topics search all of YouTube without a key: this month first, this year for a quiet topic, cached, limited per client', async () => {
+    const { app, stub, web } = await open({ web: { quiet: ['Quiet topic'] }, app: { topicLimiter: createRateLimiter({ capacity: 2, refillPerSecond: 0.0001 }) } });
+    try {
+      const { body } = await app.get('/api/live?topics=Rust');
+      // vidOf(0, 0) is in the collection: it comes with its HN card instead
+      assert.deepEqual(body.items.map((i) => i.vid), ['webVideo001', 'webFill0000', 'webFill0001', 'webFill0002', 'webFill0003']);
+      assert.deepEqual([body.items[0].source, body.items[0].via], ['topic', 'Rust']);
+      assert.deepEqual(web.calls, [['Rust', { within: 'month' }]]);
+      assert.equal(stub.calls.length, 0, 'no Data API call without a key');
+      await app.get('/api/live?topics=rust');
+      assert.equal(web.calls.length, 1, 'cached, whatever the case');
+      await app.get(`/api/live?topics=${encodeURIComponent('Quiet topic')}`);
+      assert.deepEqual(web.calls.slice(1), [['Quiet topic', { within: 'month' }], ['Quiet topic', { within: 'year' }]]);
+      const third = await app.get('/api/live?topics=zig');
+      assert.deepEqual(third.body.sources[0], { kind: 'topic', id: 'zig', ok: false, error: 'too many new topic searches, try again later' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('the search box searches all of YouTube, a page at a time, with YouTube\'s own page token', async () => {
+    const { app, web } = await open({ app: { ytSearchLimiter: createRateLimiter({ capacity: 3, refillPerSecond: 0.0001 }) } });
+    try {
+      const first = await app.get('/api/yt/search?q=rust%20%20async');
+      assert.equal(first.status, 200);
+      assert.equal(first.body.q, 'rust async');
+      assert.deepEqual(first.body.items.map((i) => [i.vid, i.in_collection]), [[vidOf(0, 0), true], ['webVideo001', false]]);
+      assert.equal(first.body.next, PAGE2);
+      const second = await app.get(`/api/yt/search?q=rust%20async&page=${PAGE2}`);
+      assert.deepEqual(second.body.items.map((i) => [i.vid, i.short]), [['webVideo002', false], ['webShort001', true]]);
+      assert.equal(second.body.next, null);
+      assert.deepEqual(web.calls, [['rust async', { page: null }], ['rust async', { page: PAGE2 }]]);
+      // a page already fetched costs nothing (a later page is its token, whatever the query), a new one spends the client's budget
+      await app.get('/api/yt/search?q=RUST%20async');
+      await app.get(`/api/yt/search?q=other&page=${PAGE2}`);
+      assert.equal(web.calls.length, 2);
+      assert.equal((await app.get('/api/yt/search?q=zig')).status, 200);
+      const limited = await app.get('/api/yt/search?q=go');
+      assert.equal(limited.status, 429);
+      assert.ok(Number(limited.headers.get('retry-after')) > 0);
+      for (const q of ['', '?q=', '?q=%01x', `?q=${'a'.repeat(201)}`, '?q=x&page=', '?q=x&page=bad%20token', '?q=x&foo=1']) assert.equal((await app.get(`/api/yt/search${q}`)).status, 400, q);
+      assert.equal(web.calls.length, 3, 'bad input never reaches YouTube');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('a YouTube search failure is a 502', async () => {
+    const { app } = await open();
+    try {
+      const r = await app.get('/api/yt/search?q=broken');
+      assert.equal(r.status, 502);
+      assert.equal(r.body.error, 'YouTube search failed, try again');
+    } finally {
+      await app.close();
+    }
+  });
+
   test('strict input', async () => {
     const { app, stub } = await open();
     try {
-      for (const q of ['', '?channels=', '?channels=UCshort', '?channels=x&foo=1', `?topics=${'a'.repeat(61)}`, `?topics=${Array.from({ length: 9 }, (_, i) => `t${i}`).join('|')}`, `?channels=${Array.from({ length: 31 }, (_, i) => `UC${String(i).padStart(22, 'x')}`).join(',')}`]) {
+      for (const q of ['', '?channels=', '?channels=UCshort', '?channels=x&foo=1', `?topics=${'a'.repeat(61)}`, `?topics=${Array.from({ length: 17 }, (_, i) => `t${i}`).join('|')}`, `?channels=${Array.from({ length: 31 }, (_, i) => `UC${String(i).padStart(22, 'x')}`).join(',')}`]) {
         assert.equal((await app.get(`/api/live${q}`)).status, 400, q);
       }
       assert.equal(stub.calls.length, 0);

@@ -62,9 +62,10 @@ tube.example.com {
 ## After it's live
 
 - Open the URL on your phone and use **Add to Home Screen** / **Install**: it runs like an app.
-- To let people follow YouTube searches (not just channels), add a free YouTube Data API key as the
-  `YOUTUBE_API_KEY` environment variable (Render: **Environment**; Cloud Run:
-  `--set-secrets` or `--set-env-vars`). How to get one is in the README. Keep it out of the repo.
+- YouTube search works with no key. To have followed topics use the official YouTube Data API
+  instead, add a free key as the `YOUTUBE_API_KEY` environment variable (Render: **Environment**;
+  Cloud Run: `--set-secrets` or `--set-env-vars`). How to get one is in the README. Keep it out of
+  the repo.
 - `/healthz` is the health check (`degraded: true` means search is keyword-only for now).
 - Everyone's likes, lists and settings live in their own browser, so there is no database to back
   up and nothing personal on the server.

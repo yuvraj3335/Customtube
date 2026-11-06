@@ -32,7 +32,8 @@
     "fuse.js": "7.5.0",
     "lru-cache": "11.5.3",
     "lucide": "1.60.0",
-    "tailwindcss": "4.3.3"
+    "tailwindcss": "4.3.3",
+    "youtubei.js": "18.3.0"
   },
   "devDependencies": {
     "eslint": "10.13.0",
