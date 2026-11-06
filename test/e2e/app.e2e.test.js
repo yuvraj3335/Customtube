@@ -209,7 +209,8 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     assert.match(titles, REAL ? /distributed/i : /physics/i);
 
     const filtered = page.waitForResponse((r) => r.url().includes('/api/search') && r.url().includes('type=lecture'));
-    await page.selectOption('select[data-filter="type"]', 'lecture');
+    await page.click('.picker-btn[data-filter="type"]');
+    await page.click('.picker-pop .picker-opt[data-value="lecture"]');
     const fb = await (await filtered).json();
     assert.ok(fb.items.every((x) => x.content_type === 'lecture'));
     assert.match(page.url(), /type=lecture/);
@@ -230,10 +231,22 @@ describe(`Custom Tube in a browser (${REAL ? 'real data' : 'fixture data'})`, ()
     await page.check('input[data-type="lecture"]');
     await page.locator('#mix-explore').fill('0');
     await page.locator('#mix-explore').dispatchEvent('change');
-    const mute = page.locator('#mute-topic-select');
-    const topic = await mute.locator('option').nth(1).getAttribute('value');
-    await mute.selectOption(topic);
+    // the topic picker: a searchable list, not a native select
+    await page.click('#mute-topic-select');
+    const search = page.locator('.picker-pop .picker-search');
+    await search.fill('zzz no such topic');
+    await page.waitForSelector('.picker-pop .picker-empty:not([hidden])');
+    await search.fill('');
+    const first = page.locator('.picker-pop .picker-opt').first();
+    const topic = await first.getAttribute('data-value');
+    const name = (await first.locator('.picker-opt-label').textContent()).trim();
+    // typing part of a topic's name narrows the list to it; Enter picks it
+    await search.fill(name.split(/\s+/)[0]);
+    assert.ok(!(await first.isHidden()));
+    await search.press('Enter');
+    await page.waitForSelector('.picker-pop', { state: 'detached' });
     await page.waitForSelector('.chip.removable');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'mute-topic-select', 'focus returns to the picker');
 
     const feed = page.waitForResponse((r) => r.url().includes('/api/feed'));
     await page.click('text=See my feed');

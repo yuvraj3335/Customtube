@@ -5,6 +5,7 @@ import { autoUpdate, computePosition, flip, offset, shift } from '@floating-ui/d
 import { hydrateIcons, icon } from './icons.js';
 import { createPalette } from './palette.js';
 import { createPlayer } from './player.js';
+import { closePicker, picker, pickerOpen } from './picker.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -403,9 +404,9 @@ let config = { has_youtube_metadata: false, search_mode: 'keyword', filters: { t
 // ---------- shared components ----------
 
 const thumbUrl = (vid, frame) => `https://i.ytimg.com/vi/${vid}/${frame ? 'hq2' : 'hqdefault'}.jpg`;
-function thumbImg(vid, { eager = false, short = false } = {}) {
-  // YouTube's mid-video frame (hq2) is blank for Shorts, so they always get the uploader's image.
-  const img = h('img', { src: thumbUrl(vid, state.frames && !short), alt: '', loading: eager ? 'eager' : 'lazy', decoding: 'async', width: 480, height: 360 });
+function thumbImg(vid, { eager = false } = {}) {
+  // (Shorts use shortThumb: their mid-video frame, hq2, is blank.)
+  const img = h('img', { src: thumbUrl(vid, state.frames), alt: '', loading: eager ? 'eager' : 'lazy', decoding: 'async', width: 480, height: 360 });
   img.addEventListener('error', () => {
     if (img.src.endsWith('/hq2.jpg')) img.src = thumbUrl(vid, false);
   });
@@ -449,8 +450,8 @@ function card(item) {
       { class: 'card-link', href: `/watch/${item.vid}`, title: item.reason || null },
       h(
         'div',
-        { class: 'thumb' },
-        thumbImg(item.vid, { short: item.short || item.format === 'short' }),
+        { class: `thumb${item.short || item.format === 'short' ? ' is-short' : ''}` },
+        item.short || item.format === 'short' ? shortThumb(item.vid) : thumbImg(item.vid),
         item.short || item.format === 'short' ? h('span', { class: 'badge' }, 'Short') : null,
         item.yt?.duration_s ? h('span', { class: 'dur' }, fmtDuration(item.yt.duration_s)) : null,
         progressBar(item.vid),
@@ -710,6 +711,10 @@ function infiniteGrid(container, load, { empty, token }) {
     if (busy || done || failed || !current(ctx.token)) return;
     busy = true;
     try {
+      if (rendered && !skeletons.length) {
+        skeletons.push(...Array.from({ length: 4 }, () => h('div', { class: 'skeleton-card', 'aria-hidden': 'true' }, h('div', { class: 'thumb' }), h('div', { class: 'bar' }), h('div', { class: 'bar short' }))));
+        grid.append(...skeletons);
+      }
       const page = await load(offset);
       if (!current(ctx.token)) return;
       for (const s of skeletons.splice(0)) s.remove();
@@ -718,8 +723,9 @@ function infiniteGrid(container, load, { empty, token }) {
       // `consumed` lets a loader add its own items (My videos) without shifting server offsets.
       offset += page.consumed ?? page.items.length;
       done = page.next_offset === null || page.next_offset === undefined || page.items.length === 0;
-      status.replaceChildren(done ? (rendered ? '' : empty) : 'Loading…');
-      status.hidden = done && rendered > 0;
+      status.replaceChildren(done && !rendered ? empty : '');
+      // while more pages come, the skeleton cards say so
+      status.hidden = !(done && !rendered);
     } catch (err) {
       if (!current(ctx.token)) return;
       for (const s of skeletons.splice(0)) s.remove();
@@ -789,15 +795,17 @@ function filterBar({ search = false } = {}) {
   const select = (key, values) => {
     if (!values?.length) return null;
     const labels = OPTION_LABELS[key] || {};
-    const sel = h(
-      'select',
-      { 'aria-label': FILTER_LABELS[key], dataset: { filter: key } },
-      key === 'sort' ? null : h('option', { value: '' }, `Any ${FILTER_LABELS[key].toLowerCase()}`),
-      values.map((v) => h('option', { value: v }, labels[v] || cap(v))),
-    );
-    sel.value = active[key] || (key === 'sort' ? values[0] : '');
-    sel.addEventListener('change', () => go(key, key === 'sort' && sel.value === values[0] ? '' : sel.value));
-    return h('label', { class: 'filter' }, h('span', {}, FILTER_LABELS[key]), sel);
+    const current = active[key] || (key === 'sort' ? values[0] : '');
+    const opts = [...(key === 'sort' ? [] : [['', `Any ${FILTER_LABELS[key].toLowerCase()}`]]), ...values.map((v) => [v, labels[v] || cap(v)])];
+    return picker({
+      label: FILTER_LABELS[key],
+      prefix: FILTER_LABELS[key],
+      text: key !== 'sort' && !current ? 'Any' : opts.find(([v]) => v === current)?.[1] ?? cap(current),
+      className: current && key !== 'sort' ? 'set' : '',
+      dataset: { filter: key },
+      groups: [{ options: opts.map(([value, label]) => ({ value, label, checked: value === current })) }],
+      onSelect: (v) => v !== current && go(key, key === 'sort' && v === values[0] ? '' : v),
+    });
   };
   const check = (key, label) => {
     const box = h('input', { type: 'checkbox', dataset: { filter: key } });
@@ -901,7 +909,6 @@ async function home(token, { restore = false } = {}) {
       ['foryou', 'For you', '/'],
       ['following', 'Following', '/?tab=following'],
     ].map(([id, label, href]) => h('a', { class: `chip${tab === id ? ' on' : ''}`, href, 'aria-current': tab === id ? 'page' : null }, label)),
-    h('a', { class: 'chip tune', href: '/settings' }, icon('sliders'), 'Tune feed'),
   );
   section.append(tabs);
 
@@ -951,6 +958,7 @@ async function home(token, { restore = false } = {}) {
           : 'HN classics, recent favourites and topics to explore. Like a few videos to tune this feed.',
       h('button', { type: 'button', class: 'pill primary', id: 'play-feed', onclick: () => startQueue(vidsOnPage().slice(0, 100), tab === 'following' ? 'Following' : 'Your feed') }, icon('play'), 'Play all'),
       playAllLink(vidsOnPage),
+      h('a', { class: 'pill', href: '/settings', id: 'tune-feed' }, icon('sliders'), 'Tune feed'),
       hasLiveSources() && (state.prefs.mix.live > 0 || tab === 'following')
         ? h('button', { type: 'button', class: 'pill', id: 'refresh-live', title: 'Fetch new uploads from YouTube', onclick: () => ((liveEpoch++), (homeCache = null), route({ keepScroll: true, focus: '#refresh-live' })) }, icon('refresh'), 'Refresh')
         : null,
@@ -1011,8 +1019,15 @@ async function home(token, { restore = false } = {}) {
           const found = take('topic');
           for (const it of [...shorts, ...fresh, ...found]) used.add(it.vid);
           if (shorts.length) liveShelves.append(shortsShelf(shorts.slice(0, 20), { title: 'New Shorts' }));
-          if (fresh.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'New from your channels'), h('a', { href: '/channels' }, 'Channels')), h('div', { class: 'row-scroll' }, fresh.map(card))));
-          if (found.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Fresh on YouTube in your topics'), h('a', { href: '/settings#live' }, 'Edit')), h('div', { class: 'row-scroll' }, found.map(card))));
+          if (fresh.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'New from your channels'), h('a', { href: '/channels' }, 'See all')), h('div', { class: 'row-scroll' }, fresh.map(card))));
+          if (liveShelves.childElementCount || found.length) {
+            const head = section.querySelector(':scope > h2.visually-hidden');
+            if (head) {
+              head.className = 'grid-head';
+              head.textContent = tab === 'following' ? 'From topics you follow' : 'More for you';
+            }
+          }
+          if (found.length) liveShelves.append(h('section', { class: 'shelf' }, h('div', { class: 'shelf-head' }, h('h2', {}, 'Fresh on YouTube in your topics'), h('a', { href: '/settings#live' }, 'Manage')), h('div', { class: 'row-scroll' }, found.map(card))));
         }
       }
       try {
@@ -1133,12 +1148,12 @@ async function categoryPage(token, id) {
 }
 
 function topicButtons(id, name) {
-  const follow = h('button', { type: 'button', class: 'pill', id: 'follow-topic' });
+  const follow = h('button', { type: 'button', class: 'pill follow', id: 'follow-topic' });
   const mute = h('button', { type: 'button', class: 'pill', id: 'mute-topic' });
   const render = () => {
     const f = state.prefs.followTopics.includes(id);
     const m = state.prefs.muteTopics.includes(id);
-    follow.textContent = f ? 'Following' : 'Follow topic';
+    follow.replaceChildren(icon(f ? 'check' : 'plus'), f ? 'Following' : 'Follow topic');
     follow.classList.toggle('on', f);
     follow.setAttribute('aria-pressed', String(f));
     mute.textContent = m ? 'Muted' : 'Mute topic';
@@ -1167,7 +1182,7 @@ async function areaPage(token, id) {
     {},
     h('a', { class: 'crumb', href: '/topics' }, 'Topics'),
     pageHead(area.name, plural(area.count, 'video'), playAllLink(vidsOnPage)),
-    h('div', { class: 'chips' }, area.categories.map((c) => h('a', { class: 'chip', href: `/c/${c.id}` }, c.name, h('span', { class: 'count' }, c.count)))),
+    h('div', { class: 'chips row-sm' }, area.categories.map((c) => h('a', { class: 'chip', href: `/c/${c.id}` }, c.name, h('span', { class: 'count' }, c.count)))),
     filterBar(),
   );
   view.replaceChildren(section);
@@ -1370,12 +1385,21 @@ function shareButton(url, title) {
 }
 
 // All of these meet 4.5:1 with white text.
-const AVATAR_COLORS = ['#c93a20', '#2563c9', '#15803d', '#8b3fd1', '#b45309', '#0e7c86', '#be185d', '#4f5bd5'];
+/** A paragraph cut to six lines, with "Show more" when it is longer. */
+function clampedText(parts) {
+  const p = h('p', { class: 'clamped' }, parts);
+  const more = h('button', { type: 'button', class: 'more-text', hidden: true, 'aria-expanded': 'false' }, 'Show more');
+  more.addEventListener('click', () => {
+    const open = p.classList.toggle('clamped') === false;
+    more.textContent = open ? 'Show less' : 'Show more';
+    more.setAttribute('aria-expanded', String(open));
+  });
+  requestAnimationFrame(() => (more.hidden = p.scrollHeight <= p.clientHeight + 1));
+  return [p, more];
+}
+
 function avatar(name) {
-  let hsh = 0;
-  for (const ch of String(name)) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
   const el = h('span', { class: 'avatar', 'aria-hidden': 'true' }, String(name).slice(0, 1).toUpperCase() || '?');
-  el.style.background = AVATAR_COLORS[hsh % AVATAR_COLORS.length];
   return el;
 }
 
@@ -1515,7 +1539,7 @@ async function watchPage(token, vid) {
         'div',
         { class: 'comment-body' },
         h('header', {}, h('b', {}, m.author), h('span', {}, monthLabel(m.month)), m.story_title ? h('span', { class: 'story' }, `in “${m.story_title}”`) : null),
-        h('p', {}, commentText(m.text)),
+        clampedText(commentText(m.text)),
         h('footer', {}, h('span', { class: `stance ${m.stance}` }, STANCES[m.stance] || m.stance), h('a', { href: `https://news.ycombinator.com/item?id=${Number(m.id)}`, target: '_blank', rel: 'noopener' }, 'View on HN')),
       ),
     ),
@@ -1534,7 +1558,7 @@ async function watchPage(token, vid) {
         h(
           'div',
           { class: 'owner' },
-          h('div', {}, channelLink({ name: d.channel, vid: d.vid }), h('p', { class: 'sub' }, facts.join(' · '))),
+          h('div', {}, channelLink({ name: d.channel, vid: d.vid }), h('p', { class: 'sub' }, facts.flatMap((f, i) => [i ? ' · ' : null, h('span', {}, f)]))),
           h('div', { class: 'actions' }, followChannelButton({ name: d.channel, vid: d.vid }), h('div', { class: 'seg', role: 'group', 'aria-label': 'Rate this video' }, voteBtn('like'), voteBtn('dislike')), laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(d.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`${location.origin}/watch/${d.vid}`, d.title), watchMoreButton({ channel: d.channel, youtubeUrl: `https://www.youtube.com/watch?v=${d.vid}` })),
         ),
         d.duplicate_of ? h('p', { class: 'note' }, 'This is another upload of ', h('a', { href: `/watch/${d.duplicate_of}` }, 'a video in the collection'), '.') : null,
@@ -1619,10 +1643,23 @@ function customWatchPage(c, { live = false } = {}) {
   }, 'Remove from My videos');
   const laterPill = h('button', { type: 'button', class: 'pill', id: 'save-later', dataset: { later: c.vid } });
   renderLaterPill(laterPill, c.vid);
+  // Live videos get an "Up next" from YouTube: videos like this one (a search for its title).
+  const upnext = live && config.live?.search ? h('aside', { class: 'upnext', 'aria-label': 'Up next' }, h('h2', {}, 'Up next'), h('p', { class: 'status' }, 'Loading…')) : null;
+  if (upnext) {
+    const token = routeToken;
+    api(`/api/yt/search${qs({ q: c.title.slice(0, 200) })}`)
+      .then((res) => {
+        if (!current(token)) return;
+        const items = res.items.filter((it) => it.vid !== c.vid).slice(0, 15);
+        rememberLive(items.filter((it) => !it.in_collection).map((it) => ({ ...it, source: 'topic', via: c.title.slice(0, 200) })));
+        upnext.replaceChildren(h('h2', {}, 'Up next'), items.length ? h('div', { class: 'list' }, items.map((it) => card(liveAsItem(it)))) : h('p', { class: 'status' }, 'Nothing like it found.'));
+      })
+      .catch(() => current(token) && upnext.remove());
+  }
   view.replaceChildren(
     h(
       'div',
-      { class: 'watch single' },
+      { class: `watch${upnext ? '' : ' single'}` },
       h(
         'section',
         { class: 'primary' },
@@ -1640,6 +1677,7 @@ function customWatchPage(c, { live = false } = {}) {
           h('div', { class: 'actions' }, c.channel ? followChannelButton({ id: c.channelId, name: c.channel, vid: c.vid }) : null, laterPill, h('button', { type: 'button', class: 'pill', id: 'save-list', onclick: (e) => saveToListDialog(c.vid, e.currentTarget) }, icon('list-plus'), 'Save'), shareButton(`https://www.youtube.com/watch?v=${c.vid}`, c.title), remove, watchMoreButton({ channel: c.channel, youtubeUrl: c.short ? `https://www.youtube.com/shorts/${c.vid}` : `https://www.youtube.com/watch?v=${c.vid}` })),
         ),
       ),
+      upnext,
     ),
   );
 }
@@ -1762,27 +1800,27 @@ async function resolveCards(vids, token) {
     .filter(Boolean);
 }
 
-async function savedPage(token, { title, empty, vids, extra, play = false }) {
+async function savedPage(token, { title, empty, vids, extra, play = false, emptyIcon = 'library' }) {
   const newestFirst = vids.slice().reverse();
   const playHere = play && vids.length ? h('button', { type: 'button', class: 'pill primary', id: 'play-here', onclick: () => startQueue(vidsOnPage(), title) }, icon('play'), 'Play') : null;
   const section = h('section', {}, pageHead(title, null, playHere, vids.length ? playAllLink(vidsOnPage) : null, extra || null));
   view.replaceChildren(section);
   if (!newestFirst.length) {
-    section.append(h('p', { class: 'status' }, empty));
+    section.append(emptyState(emptyIcon, 'Nothing here yet', empty));
     return;
   }
   const items = await resolveCards(newestFirst, token);
   if (!items) return;
   const sub = h('p', { class: 'sub' }, plural(items.length, 'video'));
   section.querySelector('.pagehead > div').append(sub);
-  section.append(items.length ? h('div', { class: 'grid' }, items.map(card)) : h('p', { class: 'status' }, empty));
+  section.append(items.length ? h('div', { class: 'grid' }, items.map(card)) : emptyState(emptyIcon, 'Nothing here yet', empty));
 }
 
 async function historyPage(token) {
   const clear = state.seen.length
     ? h('button', {
         type: 'button',
-        class: 'pill',
+        class: 'pill danger',
         id: 'clear-history',
         onclick: () => {
           const before = state.seen;
@@ -1797,7 +1835,7 @@ async function historyPage(token) {
         },
       }, 'Clear history')
     : null;
-  await savedPage(token, { title: 'History', empty: 'Videos you open show up here.', vids: state.seen, extra: clear });
+  await savedPage(token, { title: 'History', empty: 'Videos you open show up here.', vids: state.seen, extra: clear, emptyIcon: 'clock' });
 }
 
 async function aboutPage(token) {
@@ -1824,7 +1862,7 @@ async function aboutPage(token) {
         {},
         h('li', {}, h('b', {}, 'Ranking. '), 'A video’s score is the number of different months HN recommended it in, with strong recommendations counting extra, so lasting recommendations beat one viral spike.'),
         h('li', {}, h('b', {}, 'Home '), 'mixes HN classics, recent favourites and topics you haven’t explored. Once you like videos it adds similar ones (by meaning) and ones the same HN people also recommended. Dislikes push similar videos down. Your likes and history never leave this browser except as part of each feed request, and the server keeps none of it.'),
-        h('li', {}, h('b', {}, 'Search '), 'matches by meaning with the bge-small-en-v1.5 model, plus keywords and topics.'),
+        h('li', {}, h('b', {}, 'Search '), 'matches by meaning (a small semantic model running on the server), plus keywords and topics.'),
         h('li', {}, h('b', {}, 'Privacy. '), 'No accounts and no tracking. Videos play through YouTube’s privacy-enhanced embed, and only after you press play.'),
       ),
       h('h2', {}, 'Make it yours'),
@@ -1904,7 +1942,7 @@ async function settingsPage(token) {
       { class: 'hint' },
       formatsOk
         ? 'Lengths come from YouTube. Videos you add yourself count as Shorts when added from a /shorts/ link.'
-        : 'The HN collection has no durations yet, so these apply only to videos you add yourself. Add YouTube metadata (see README) to filter the whole feed.',
+        : 'The HN collection has no durations yet, so these apply only to videos you add yourself. With YouTube metadata on the server they filter the whole feed.',
     ),
   );
 
@@ -1944,7 +1982,10 @@ async function settingsPage(token) {
       const text = (w) => (Number(w) === 0 ? 'off' : `${w} of 5`);
       const out = h('output', { class: 'weight', for: `mix-${key}`, 'aria-hidden': 'true' }, String(p.mix[key]));
       const range = h('input', { type: 'range', min: 0, max: 5, step: 1, value: p.mix[key], id: `mix-${key}`, 'aria-label': `${label} weight`, 'aria-valuetext': text(p.mix[key]) });
+      const fill = () => range.style.setProperty('--fill', `${(Number(range.value) / 5) * 100}%`);
+      fill();
       range.addEventListener('input', () => {
+        fill();
         p.mix[key] = Number(range.value);
         out.textContent = range.value;
         range.setAttribute('aria-valuetext', text(range.value));
@@ -1968,7 +2009,7 @@ async function settingsPage(token) {
               title: `Remove ${label(it)}`,
               onclick: (e) => {
                 const chip = e.currentTarget;
-                const next = chip.nextElementSibling || chip.previousElementSibling || chip.closest('fieldset')?.querySelector('select');
+                const next = chip.nextElementSibling || chip.previousElementSibling || chip.closest('fieldset')?.querySelector('.picker-btn');
                 onRemove(it);
                 chip.remove();
                 next?.focus();
@@ -1978,14 +2019,21 @@ async function settingsPage(token) {
         )
       : h('p', { class: 'hint' }, emptyText);
   const topicSelect = (kind) => {
-    const sel = h('select', { 'aria-label': kind === 'follow' ? 'Follow a topic' : 'Mute a topic', id: `${kind}-topic-select` }, h('option', { value: '' }, kind === 'follow' ? 'Follow a topic…' : 'Mute a topic…'), areas.map((a) => h('optgroup', { label: a.name }, a.categories.map((c) => h('option', { value: c.id }, c.name)))));
-    sel.addEventListener('change', () => {
-      if (!sel.value) return;
-      const list = kind === 'follow' ? p.followTopics : p.muteTopics;
-      if (!list.includes(sel.value)) toggleTopic(sel.value, kind);
-      route({ keepScroll: true, focus: `#${kind}-topic-select` });
+    const list = kind === 'follow' ? p.followTopics : p.muteTopics;
+    return picker({
+      id: `${kind}-topic-select`,
+      label: kind === 'follow' ? 'Follow a topic' : 'Mute a topic',
+      text: kind === 'follow' ? 'Follow a topic…' : 'Mute a topic…',
+      className: 'wide mt-2',
+      searchable: true,
+      placeholder: 'Search topics',
+      groups: areas.map((a) => ({ label: a.name, options: a.categories.map((c) => ({ value: c.id, label: c.name, hint: String(c.count), checked: list.includes(c.id) })) })),
+      // picking a ticked topic takes it off the list again
+      onSelect: (id) => {
+        toggleTopic(id, kind);
+        route({ keepScroll: true, focus: `#${kind}-topic-select` });
+      },
     });
-    return sel;
   };
   const topics = h(
     'fieldset',
@@ -2007,7 +2055,7 @@ async function settingsPage(token) {
 
   // Live from YouTube: channels (always) and topic searches (when the server has a key)
   const liveTopicsOk = Boolean(config.live?.topics);
-  const channelInput = h('input', { type: 'text', id: 'live-channel-input', maxlength: 500, placeholder: 'Channel link, @handle, or a link to one of its videos', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'YouTube channel to follow' });
+  const channelInput = h('input', { type: 'text', id: 'live-channel-input', maxlength: 500, placeholder: 'Channel link or @handle', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'YouTube channel to follow' });
   const channelForm = h(
     'form',
     { class: 'addform mt-2', id: 'live-channel-form' },
@@ -2035,7 +2083,7 @@ async function settingsPage(token) {
       channelInput.focus();
     }
   });
-  const topicInput = h('input', { type: 'text', id: 'live-topic-input', placeholder: 'A search, like “rust compilers” or “f1 technical”', maxlength: 60, autocomplete: 'off', 'aria-label': 'YouTube search to follow', disabled: !liveTopicsOk });
+  const topicInput = h('input', { type: 'text', id: 'live-topic-input', placeholder: 'e.g. rust compilers', maxlength: 60, autocomplete: 'off', 'aria-label': 'YouTube search to follow', disabled: !liveTopicsOk });
   const topicForm = h('form', { class: 'addform mt-2', id: 'live-topic-form' }, topicInput, h('button', { type: 'submit', class: 'pill primary', disabled: !liveTopicsOk }, icon('plus'), 'Add'));
   topicForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -2106,7 +2154,7 @@ async function settingsPage(token) {
       importInput,
       h('button', {
         type: 'button',
-        class: 'pill',
+        class: 'pill danger',
         id: 'reset-prefs',
         onclick: () => {
           const before = state.prefs;
@@ -2119,7 +2167,7 @@ async function settingsPage(token) {
             route({ keepScroll: true });
           });
         },
-      }, 'Reset feed settings'),
+      }, icon('refresh'), 'Reset feed settings'),
     ),
     h('p', { class: 'hint' }, 'Everything here is stored in this browser only. Export it to move it to another browser.'),
   );
@@ -2226,7 +2274,7 @@ async function minePage() {
       pageHead('My videos', 'Add any YouTube video or Short. They join your Home feed (set how often under Customize feed).', items.length ? playAllLink(vidsOnPage) : null),
       form,
       status,
-      items.length ? h('div', { class: 'grid' }, items.map(card)) : h('p', { class: 'status' }, 'Nothing added yet.'),
+      items.length ? h('div', { class: 'grid' }, items.map(card)) : emptyState('plus', 'Nothing added yet', 'Paste a YouTube link above. Videos and Shorts you add join your Home feed.'),
     ),
   );
 }
@@ -2273,7 +2321,7 @@ async function libraryPage(token) {
         'section',
         { class: 'shelf' },
         h('div', { class: 'shelf-head' }, h('h2', {}, 'Lists'), h('a', { href: '/lists' }, state.lists.length ? `All ${state.lists.length}` : 'Make one')),
-        state.lists.length ? h('div', { class: 'grid' }, state.lists.slice(-4).reverse().map(listCard)) : h('p', { class: 'hint' }, 'Group videos into your own playlists with “Save to list”.'),
+        state.lists.length ? h('div', { class: 'grid' }, state.lists.slice(-4).reverse().map(listCard)) : h('p', { class: 'empty-row' }, icon('list-plus'), 'Group videos into your own playlists with “Save to list”.'),
       ),
       sections.map(([title, href, vids, emptyText]) => {
         const cards = vids.slice(0, 4).map((v) => byVid.get(v)).filter(Boolean);
@@ -2282,7 +2330,7 @@ async function libraryPage(token) {
           'section',
           { class: 'shelf' },
           h('div', { class: 'shelf-head' }, h('h2', {}, title, cards.length ? h('span', { class: 'count' }, vids.length) : null), link),
-          cards.length ? h('div', { class: 'grid' }, cards.map(card)) : h('p', { class: 'hint' }, emptyText),
+          cards.length ? h('div', { class: 'grid' }, cards.map(card)) : h('p', { class: 'empty-row' }, icon('library'), emptyText),
         );
       }),
     ),
@@ -2295,10 +2343,9 @@ function listsPage() {
     h(
       'section',
       {},
-      h('a', { class: 'crumb', href: '/library' }, 'Library'),
       pageHead('Lists', 'Your own playlists. Play any of them on YouTube.'),
       newListForm((l) => navigate(`/list/${l.id}`)),
-      state.lists.length ? h('div', { class: 'grid lists' }, state.lists.slice().reverse().map(listCard)) : h('p', { class: 'status' }, 'No lists yet.'),
+      state.lists.length ? h('div', { class: 'grid lists' }, state.lists.slice().reverse().map(listCard)) : emptyState('list-plus', 'No lists yet', 'Name one above, or use “Save to list” on any video.'),
     ),
   );
 }
@@ -2415,9 +2462,14 @@ async function listPageOne(token, id) {
   );
 }
 
-function notFound(message = 'Page not found.') {
+function notFound(message = 'This page doesn’t exist.') {
   document.title = `Not found · ${SITE}`;
-  view.replaceChildren(h('section', { class: 'empty' }, h('h1', {}, 'Not found'), h('p', {}, message), h('a', { class: 'pill', href: '/' }, 'Go home')));
+  view.replaceChildren(h('section', { class: 'mx-auto max-w-xl pt-10' }, h('h1', { class: 'visually-hidden' }, 'Not found'), emptyState('search', 'Not found', message, h('a', { class: 'pill primary', href: '/' }, icon('home'), 'Go home'))));
+}
+
+/** An empty list: an icon, a line about what goes here, and optionally the one thing to do. */
+function emptyState(iconName, title, text, action = null) {
+  return h('div', { class: 'empty-state' }, h('span', { class: 'empty-icon' }, icon(iconName)), h('h2', {}, title), text ? h('p', {}, text) : null, action);
 }
 
 // ---------- sidebar ----------
@@ -2442,7 +2494,7 @@ function renderSide() {
       {},
       h('h2', {}, h('span', {}, 'Subscriptions'), h('a', { href: '/channels', class: 'side-h2-link' }, state.prefs.liveChannels.length ? 'All' : 'Find')),
       state.prefs.liveChannels.length
-        ? state.prefs.liveChannels.slice(0, 12).map((c) => h('a', { href: `/channel/${c.id}` }, h('span', { class: 'ch-avatar xs', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('span', { class: 'truncate' }, c.name)))
+        ? state.prefs.liveChannels.slice(0, 12).map((c) => h('a', { href: `/channel/${c.id}` }, chAvatar(c.name, 'xs'), h('span', { class: 'truncate' }, c.name)))
         : h('p', { class: 'side-empty' }, 'Follow a channel and its new uploads join Home.'),
       state.prefs.liveChannels.length > 12 ? h('a', { href: '/channels', class: 'hint' }, `All ${state.prefs.liveChannels.length}`) : null,
     ),
@@ -2519,6 +2571,15 @@ function channelLink({ id, name, vid }) {
 }
 
 /** Follow or unfollow a YouTube channel: its new uploads join Home and Shorts. */
+/** A channel's initial on a tint picked from its name (YouTube avatars would need the Data API). */
+function chAvatar(name, size = '') {
+  let hsh = 0;
+  for (const ch of String(name)) hsh = (hsh * 31 + ch.codePointAt(0)) >>> 0;
+  const el = h('span', { class: `ch-avatar ${size}`.trim(), 'aria-hidden': 'true' }, String(name).slice(0, 1).toUpperCase() || '?');
+  el.style.setProperty('--hue', String(hsh % 360));
+  return el;
+}
+
 function followChannelButton({ id, name, vid }, { compact: small = false } = {}) {
   const btn = h('button', { type: 'button', class: `pill follow${small ? ' sm' : ''}`, dataset: { followName: name } });
   if (!small) btn.id = 'follow-channel';
@@ -2550,7 +2611,22 @@ function followChannelButton({ id, name, vid }, { compact: small = false } = {})
   return btn;
 }
 
-const shortThumb = (vid) => h('img', { src: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`, alt: '', loading: 'lazy', decoding: 'async', width: 480, height: 360 });
+/**
+ * A Short's portrait cover (YouTube's 9:16 "oar2" image). Without one, its 4:3 image, which has
+ * black bars baked in: `letterboxed` zooms past them.
+ */
+function shortThumb(vid) {
+  const img = h('img', { src: `https://i.ytimg.com/vi/${vid}/oar2.jpg`, alt: '', loading: 'lazy', decoding: 'async', width: 270, height: 480 });
+  const fallback = () => {
+    if (img.classList.contains('letterboxed')) return;
+    img.classList.add('letterboxed');
+    img.src = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+  };
+  img.addEventListener('error', fallback);
+  // a missing cover comes back as a 404 *with* a 120x90 grey image, which fires load, not error
+  img.addEventListener('load', () => img.naturalWidth <= 120 && fallback());
+  return img;
+}
 
 /** A vertical card for a Short: opens it in the Shorts player. */
 function shortCard(item, href) {
@@ -2567,7 +2643,7 @@ function shortsShelf(items, { href = (it) => `/shorts?v=${it.vid}`, title = 'Sho
   return h(
     'section',
     { class: 'shelf', 'aria-label': title },
-    h('div', { class: 'shelf-head' }, h('h2', {}, icon('shorts'), title), h('a', { href: '/shorts' }, 'Open Shorts')),
+    h('div', { class: 'shelf-head' }, h('h2', {}, title), h('a', { href: '/shorts' }, 'See all')),
     h('div', { class: 'row-scroll shorts-row' }, items.map((it) => shortCard(it, href(it)))),
   );
 }
@@ -2593,7 +2669,7 @@ async function channelPage(token, id) {
     h(
       'header',
       { class: 'channel-head' },
-      h('div', { class: 'ch-avatar', 'aria-hidden': 'true' }, name.slice(0, 1).toUpperCase()),
+      chAvatar(name),
       h('div', { class: 'min-w-0' }, h('h1', {}, name), h('p', { class: 'sub', id: 'channel-facts' }, items.length ? `${plural(items.length, 'recent upload')} on YouTube` : 'Couldn’t load recent uploads right now')),
       h('div', { class: 'actions' }, followChannelButton({ id, name }), shorts.length ? h('a', { class: 'pill', href: `/shorts?channel=${id}` }, icon('shorts'), 'Play Shorts') : null, h('a', { class: 'pill', href: `https://www.youtube.com/channel/${id}`, target: '_blank', rel: 'noopener' }, icon('external'), 'YouTube')),
     ),
@@ -2622,7 +2698,7 @@ async function channelsPage(token) {
         'section',
         { class: 'shelf' },
         h('div', { class: 'shelf-head' }, h('h2', {}, 'Following')),
-        h('div', { class: 'channel-grid' }, mine.map((c) => h('div', { class: 'channel-tile' }, h('a', { href: `/channel/${c.id}`, class: 'channel-tile-link' }, h('div', { class: 'ch-avatar sm', 'aria-hidden': 'true' }, c.name.slice(0, 1).toUpperCase()), h('b', { class: 'truncate' }, c.name)), followChannelButton({ id: c.id, name: c.name }, { compact: true })))),
+        h('div', { class: 'channel-grid' }, mine.map((c) => h('div', { class: 'channel-tile' }, h('a', { href: `/channel/${c.id}`, class: 'channel-tile-link' }, chAvatar(c.name, 'sm'), h('b', { class: 'truncate' }, c.name)), followChannelButton({ id: c.id, name: c.name }, { compact: true })))),
       ),
     );
   }
@@ -2641,7 +2717,7 @@ async function channelsPage(token) {
           'div',
           { class: 'channel-card' },
           h('div', { class: 'channel-strip' }, c.top.map((vid) => h('a', { href: `/watch/${vid}`, tabindex: '-1', 'aria-hidden': 'true' }, thumbImg(vid)))),
-          h('div', { class: 'channel-card-body' }, h('div', { class: 'min-w-0' }, channelLink({ name: c.channel, vid: c.top[0] }), h('p', { class: 'card-meta' }, `${plural(c.videos, 'video')} · ${plural(c.recommenders, 'HN recommendation')}`)), followChannelButton({ name: c.channel, vid: c.top[0] }, { compact: true })),
+          h('div', { class: 'channel-card-body' }, h('div', { class: 'min-w-0' }, channelLink({ name: c.channel, vid: c.top[0] }), h('p', { class: 'card-meta' }, `${plural(c.videos, 'video')} · ${compact(c.recommenders)} HN recs`)), followChannelButton({ name: c.channel, vid: c.top[0] }, { compact: true })),
         ),
       );
     }
@@ -2727,7 +2803,7 @@ async function shortsPage(token) {
           like,
           skip,
           h('button', { type: 'button', class: `rail-btn${state.later.includes(it.vid) ? ' on' : ''}`, dataset: { later: it.vid }, 'aria-label': 'Watch later', 'aria-pressed': String(state.later.includes(it.vid)) }, icon('clock'), h('span', {}, 'Later')),
-          h('a', { class: 'rail-btn', href: `https://www.youtube.com/shorts/${it.vid}`, target: '_blank', rel: 'noopener', 'aria-label': 'Open on YouTube' }, icon('external'), h('span', {}, 'YouTube')),
+          h('a', { class: 'rail-btn', href: `https://www.youtube.com/shorts/${it.vid}`, target: '_blank', rel: 'noopener', 'aria-label': 'Open on YouTube' }, icon('external'), h('span', {}, 'Open')),
         ),
       ),
       h(
@@ -2829,6 +2905,7 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
   selected = -1;
   const { pathname } = location;
   closeMenu();
+  closePicker();
   closeDialog();
   if (youPanelOpen()) $('#side-extra').hidePopover();
   renderSide();
@@ -2863,8 +2940,8 @@ async function route({ restore = false, keepScroll = false, focus = null } = {})
     else if (pathname === '/library') await libraryPage(token);
     else if (pathname === '/lists') listsPage();
     else if ((m = /^\/list\/([a-z0-9]{8})$/.exec(pathname))) await listPageOne(token, m[1]);
-    else if (pathname === '/liked') await savedPage(token, { title: 'Liked', empty: 'Videos you like show up here and shape your Home feed.', vids: state.likes });
-    else if (pathname === '/later') await savedPage(token, { title: 'Watch later', empty: 'Save videos with the clock button.', vids: state.later, play: true });
+    else if (pathname === '/liked') await savedPage(token, { title: 'Liked', empty: 'Videos you like show up here and shape your Home feed.', vids: state.likes, emptyIcon: 'up' });
+    else if (pathname === '/later') await savedPage(token, { title: 'Watch later', empty: 'Save a video with the clock on its card, or from its ⋯ menu.', vids: state.later, play: true, emptyIcon: 'clock' });
     else if (pathname === '/history') await historyPage(token);
     else if (pathname === '/about') await aboutPage(token);
     else if (pathname === '/settings') await settingsPage(token);
@@ -2935,6 +3012,19 @@ $('#search').addEventListener('submit', (e) => {
   const src = new URLSearchParams(location.search).get('in');
   navigate(q ? `/search/${encodeURIComponent(q)}${qs(location.pathname.startsWith('/search/') ? { ...(src === 'hn' ? { in: 'hn' } : {}), ...currentFilters() } : {})}` : '/');
 });
+
+// Rows that scroll sideways fade at the right edge only while there is more to see.
+function watchRow(row) {
+  if (row.dataset.fade) return;
+  row.dataset.fade = '1';
+  const update = () => row.classList.toggle('has-more', row.scrollLeft + row.clientWidth < row.scrollWidth - 4);
+  row.addEventListener('scroll', update, { passive: true });
+  new ResizeObserver(update).observe(row);
+  update();
+}
+new MutationObserver(() => {
+  for (const row of view.querySelectorAll('.row-scroll:not([data-fade])')) watchRow(row);
+}).observe(view, { childList: true, subtree: true });
 
 // ---------- theme, toast, shortcuts ----------
 
@@ -3027,7 +3117,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   // Shortcuts never fire while typing, or while a dialog or menu is open.
-  if (typing || anyDialogOpen() || openMenu) return;
+  if (typing || anyDialogOpen() || openMenu || pickerOpen()) return;
   const sel = listItems()[selected];
   const watching = /^\/watch\/([A-Za-z0-9_-]{11})$/.exec(location.pathname)?.[1] ?? null;
   const target = sel?.dataset.vid || watching;
